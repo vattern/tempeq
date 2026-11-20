@@ -48,7 +48,8 @@ Build settings are in `sdkconfig.defaults`. After changing it, delete the genera
 `sdkconfig.esp32c6*` files so the new defaults are picked up.
 
 Note: the main core is asleep almost all the time, so USB disconnects. To re-flash,
-hold BOOT, tap RESET, then release BOOT.
+press the D0 button while the board is plugged in (it then stays awake), or hold BOOT,
+tap RESET, then release BOOT.
 
 ## How it works
 
@@ -100,6 +101,34 @@ timestamps count seconds since power-on.
 The standard Environmental Sensing Service (0x181A) is also exposed with Temperature
 (0x2A6E) and Humidity (0x2A6F), so generic apps such as nRF Connect show the latest values.
 
+## USB access
+
+Plug the logger into a computer and press its D0 button. While a USB host is
+connected, the logger stays awake and keeps advertising over BLE. When you unplug
+it, it goes back to deep sleep. A charger or power bank does not count as a host.
+
+```sh
+pip install pyserial
+python tools/th_client.py dump --usb --sync > log.csv   # auto-detects the XIAO
+python tools/th_client.py status --usb /dev/ttyACM0
+```
+
+You can also use a serial terminal. Commands are lines of text:
+
+| Command | Reply |
+|---|---|
+| `status` | `STATUS clock_set=1 now=<unix> interval=900 count=<n> capacity=96 next_due=<unix>` |
+| `dump` | `ts,temp_c,humidity_pct` header, then one CSV line per reading, oldest first |
+| `time <unix>` | sets the clock (UTC) |
+| `help` | list of commands |
+
+Every reply ends with `OK` or `ERR <reason>`. In the debug build, log lines
+(`I (1234) ...`) may appear in between.
+
+**Opening the port can reset the chip, and a reset wipes the log.** The C6's USB
+serial port resets the chip when RTS is asserted without DTR. Keep both DTR and RTS
+asserted (`th_client.py` does), or use a terminal that doesn't toggle them.
+
 ### Phone (web page)
 
 `tools/web/index.html` is a single-file Web Bluetooth page. It shows the latest reading,
@@ -113,7 +142,7 @@ The last download is cached, so the page still shows it offline.
 - Press the logger's D0 button, then tap **Connect** and pick TH-Logger.
 - Add `?demo` to the URL to preview the page with made-up data.
 
-### Host tool
+### Host tool (Bluetooth)
 
 ```sh
 pip install bleak

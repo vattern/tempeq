@@ -21,6 +21,9 @@ uint16_t datalog_snapshot(reading_t out[TH_LOG_CAPACITY]);
 // Debug: log reading count and the LP core's last sensor error code.
 void datalog_log_status(void);
 
+// Estimated time of the next reading, given the latest one (NULL if none).
+uint32_t datalog_next_due(const reading_t *latest);
+
 uint32_t datalog_now(void);
 bool datalog_time_valid(void);
 

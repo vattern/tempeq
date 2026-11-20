@@ -1,7 +1,7 @@
 idf_component_register(
-    SRCS "main.c" "datalog.c" "ble.c"
+    SRCS "main.c" "datalog.c" "ble.c" "usb_cmd.c"
     INCLUDE_DIRS "." "../include"
-    REQUIRES bt ulp nvs_flash esp_driver_gpio esp_timer esp_hw_support
+    REQUIRES bt ulp nvs_flash esp_driver_gpio esp_driver_usb_serial_jtag esp_timer esp_hw_support
 )
 
 # Build the LP-core program in ../ulp and embed it. Its globals are exported

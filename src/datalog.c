@@ -3,9 +3,12 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_private/esp_clk.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/rtc_io.h"
 #include "soc/rtc.h"
 #include "ulp_lp_core.h"
@@ -19,6 +22,10 @@ extern const uint8_t ulp_main_bin_end[] asm("_binary_ulp_main_bin_end");
 
 #define LP_LOG ((volatile th_record_t *)&ulp_log_buf)
 #define INTERVAL_US ((int64_t)TH_LOG_INTERVAL_S * 1000000LL)
+
+// Wall-clock time we last programmed the LP timer for (0 = never).
+// After that reading, the LP core falls back to its fixed 15-minute period.
+RTC_DATA_ATTR static uint32_t scheduled_epoch;
 
 void datalog_start_lp_core(void) {
   // The LP core bit-bangs I2C: open-drain LP GPIOs, released (high) at rest.
@@ -39,8 +46,16 @@ void datalog_start_lp_core(void) {
       .wakeup_source = ULP_LP_CORE_WAKEUP_SOURCE_HP_CPU | ULP_LP_CORE_WAKEUP_SOURCE_LP_TIMER,
       .lp_timer_sleep_duration_us = (uint64_t)INTERVAL_US,
   };
+  scheduled_epoch = 0;
   ESP_ERROR_CHECK(ulp_lp_core_run(&cfg));
   ESP_LOGI(TAG, "LP core started");
+
+  // Wait for the first reading, then (if the clock survived the reset) snap the
+  // schedule to the wall-clock slots. Must happen after the LP core has finished
+  // its run, or it would overwrite the timer with its default period.
+  for (int i = 0; i < 100 && ulp_log_count == 0; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  vTaskDelay(pdMS_TO_TICKS(10));
+  datalog_realign_after_reading();
 }
 
 void datalog_log_status(void) {
@@ -57,6 +72,12 @@ static int64_t now_us(void) {
 uint32_t datalog_now(void) { return (uint32_t)(now_us() / 1000000LL); }
 
 bool datalog_time_valid(void) { return datalog_now() >= MIN_VALID_EPOCH; }
+
+uint32_t datalog_next_due(const reading_t *latest) {
+  uint32_t now = datalog_now();
+  if (scheduled_epoch > now) return scheduled_epoch;
+  return latest ? latest->ts + TH_LOG_INTERVAL_S : now + TH_LOG_INTERVAL_S;
+}
 
 uint16_t datalog_snapshot(reading_t out[TH_LOG_CAPACITY]) {
   static th_record_t raw[TH_LOG_CAPACITY];
@@ -93,12 +114,14 @@ static void schedule_next_reading(int64_t next_us) {
   int64_t delay = next_us - now_us();
   if (delay < 1000000) delay += INTERVAL_US;
   ulp_lp_core_lp_timer_set_wakeup_time((uint64_t)delay);
+  scheduled_epoch = (uint32_t)((now_us() + delay) / 1000000LL);
   ESP_LOGI(TAG, "Next reading in %lld s", delay / 1000000LL);
 }
 
 void datalog_set_time(uint32_t epoch) {
   struct timeval tv = {.tv_sec = epoch, .tv_usec = 0};
   settimeofday(&tv, NULL);
+  scheduled_epoch = 0;
   ESP_LOGI(TAG, "Clock set to %lu", (unsigned long)epoch);
   if (epoch >= MIN_VALID_EPOCH) {
     int64_t t = now_us();

@@ -32,8 +32,9 @@ static const ble_uuid128_t uuid_status = TH_UUID(0x05);    // R   flags/interval
 enum { CH_TIME, CH_CURRENT, CH_CURSOR, CH_HISTORY, CH_STATUS, CH_ESS_TEMP, CH_ESS_HUM };
 
 static volatile bool connected;
+static volatile bool synced;
+static volatile bool adv_wanted;
 static volatile int64_t connected_at_us;
-static volatile int64_t window_end_us;
 static uint16_t conn_handle;
 static uint8_t own_addr_type;
 static uint8_t hist_cursor;
@@ -109,15 +110,11 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
     case CH_STATUS: {
       // [flags u8 (bit0 = clock set)][interval_s u16][count u8][capacity u8][next_due u32]
       uint8_t buf[9];
-      uint32_t interval = TH_LOG_INTERVAL_S;
-      uint32_t now = datalog_now();
-      uint32_t next = datalog_time_valid() ? (now / interval + 1) * interval
-                                           : (latest ? latest->ts + interval : now + interval);
       buf[0] = datalog_time_valid() ? 0x01 : 0x00;
-      put16(buf + 1, interval);
+      put16(buf + 1, TH_LOG_INTERVAL_S);
       buf[3] = count;
       buf[4] = TH_LOG_CAPACITY;
-      put32(buf + 5, next);
+      put32(buf + 5, datalog_next_due(latest));
       return append(ctxt->om, buf, sizeof(buf));
     }
     case CH_ESS_TEMP: {  // org.bluetooth.characteristic.temperature, sint16 0.01 degC
@@ -181,10 +178,10 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_DISCONNECT:
       connected = false;
       ESP_LOGI(TAG, "Disconnected");
-      if (esp_timer_get_time() < window_end_us) advertise();
+      if (adv_wanted) advertise();
       break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
-      if (!connected && esp_timer_get_time() < window_end_us) advertise();
+      if (!connected && adv_wanted) advertise();
       break;
   }
   return 0;
@@ -218,7 +215,8 @@ static void advertise(void) {
 static void on_sync(void) {
   ble_hs_util_ensure_addr(0);
   ble_hs_id_infer_auto(0, &own_addr_type);
-  advertise();
+  synced = true;
+  if (adv_wanted) advertise();
 }
 
 static void host_task(void *param) {
@@ -227,10 +225,10 @@ static void host_task(void *param) {
 }
 
 // ---------------------------------------------------------------------------
-void ble_run(uint32_t window_ms) {
-  int64_t start = esp_timer_get_time();
-  window_end_us = start + (int64_t)window_ms * 1000;
+void ble_start(void) {
   connected = false;
+  synced = false;
+  adv_wanted = true;
   hist_cursor = 0;
 
   if (nimble_port_init() != ESP_OK) {
@@ -244,19 +242,22 @@ void ble_run(uint32_t window_ms) {
   ble_gatts_add_svcs(gatt_svcs);
   ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
   nimble_port_freertos_init(host_task);
-  ESP_LOGI(TAG, "Advertising for %lu ms", (unsigned long)window_ms);
+}
 
-  for (;;) {
-    int64_t now = esp_timer_get_time();
-    if (connected) {
-      if (now - connected_at_us > (int64_t)BLE_MAX_CONNECTED_MS * 1000) break;
-    } else if (now >= window_end_us) {
-      break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
+void ble_set_advertising(bool on) {
+  if (on == adv_wanted) return;
+  adv_wanted = on;
+  if (!synced) return;
+  if (on && !connected) advertise();
+  if (!on) ble_gap_adv_stop();
+}
 
-  window_end_us = 0;  // stop the GAP handler from re-advertising
+int64_t ble_connected_for_us(void) {
+  return connected ? esp_timer_get_time() - connected_at_us : -1;
+}
+
+void ble_stop(void) {
+  adv_wanted = false;  // stop the GAP handler from re-advertising
   ble_gap_adv_stop();
   if (connected) {
     ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);

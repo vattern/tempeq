@@ -2,10 +2,13 @@
 //
 // The LP core (ulp/main.c) does all the logging: every 15 minutes the LP timer
 // wakes it, it reads the AHT21 over bit-banged I2C and stores the result in LP SRAM.
-// This main core only wakes to serve BLE:
+// This main core only wakes to serve BLE (and USB):
 //   - after a button press (long window),
 //   - when the LP core wakes it every BLE_WAKE_EVERY_N_READINGS readings,
 //   - on power-on (to start the LP core and give a window to set the clock).
+// If a USB host is attached during that window, it stays awake (and keeps
+// advertising) until the cable is unplugged, serving commands on the USB
+// serial port (see usb_cmd.h).
 // The log survives deep sleep but is lost on power loss / hard reset.
 
 #include "driver/gpio.h"
@@ -14,11 +17,13 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "ble.h"
 #include "config.h"
 #include "datalog.h"
+#include "usb_cmd.h"
 
 static const char *TAG = "main";
 
@@ -52,6 +57,33 @@ static void go_to_sleep(void) {
   esp_deep_sleep_start();
 }
 
+// Serve BLE for `window_ms`, longer while a BLE client or USB host is attached.
+static void serve(uint32_t window_ms) {
+  ble_start();
+  usb_cmd_start();
+  ESP_LOGI(TAG, "Serving for %lu ms", (unsigned long)window_ms);
+
+  int64_t window_end = esp_timer_get_time() + (int64_t)window_ms * 1000;
+  bool usb_was_connected = false;
+  for (;;) {
+    bool usb = usb_cmd_host_connected();
+    if (usb != usb_was_connected) {
+      ESP_LOGI(TAG, "USB host %s", usb ? "connected: staying awake" : "disconnected");
+      usb_was_connected = usb;
+    }
+    if (usb) usb_cmd_poll();
+
+    bool window_open = esp_timer_get_time() < window_end;
+    int64_t ble_conn = ble_connected_for_us();
+    bool ble_busy = ble_conn >= 0 && ble_conn < (int64_t)BLE_MAX_CONNECTED_MS * 1000;
+    if (!window_open && !usb && !ble_busy) break;
+
+    ble_set_advertising(window_open || usb);
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  ble_stop();
+}
+
 void app_main(void) {
   esp_log_level_set("*", TH_DEBUG ? ESP_LOG_INFO : ESP_LOG_WARN);
 
@@ -71,9 +103,6 @@ void app_main(void) {
   uint32_t window = BLE_WINDOW_BUTTON_MS;
   if (cold_boot) {
     datalog_start_lp_core();
-#if TH_DEBUG
-    vTaskDelay(pdMS_TO_TICKS(300));  // let the first reading finish so it can be logged
-#endif
   } else if (cause == ESP_SLEEP_WAKEUP_ULP) {
     datalog_realign_after_reading();
     window = BLE_WINDOW_AFTER_WAKE_MS;
@@ -90,7 +119,7 @@ void app_main(void) {
     }
     gpio_hold_dis(PIN_RF_SWITCH_EN);
     rf_switch(true);
-    ble_run(window);
+    serve(window);
   }
   go_to_sleep();
 }

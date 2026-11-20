@@ -11,6 +11,9 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
 
+# --- Console on USB (shared with the USB command interface) -------------------
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # --- Power / wake time ---------------------------------------------------------
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
 CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
