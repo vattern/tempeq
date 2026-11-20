@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181c" media="(prefers-color-scheme: dark)">
+<title>TH Logger</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --surface: #ffffff;
+    --text: #1d1f23;
+    --muted: #6b6f78;
+    --line: #e4e2dc;
+    --accent: #2b5fd9;
+    --accent-text: #ffffff;
+    --temp: #d4571c;
+    --hum: #1f7fb8;
+    --ok: #2e8b57;
+    --warn: #b7791f;
+    --err: #c0392b;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --surface: #1f2228;
+      --text: #eceef1;
+      --muted: #9aa0aa;
+      --line: #30343c;
+      --accent: #5b8cff;
+      --accent-text: #0d1117;
+      --temp: #ff8a50;
+      --hum: #4fb3ea;
+      --ok: #5cc98a;
+      --warn: #e0b04f;
+      --err: #ff6b5e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  }
+  main { max-width: 720px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h1 { font-size: 1.25rem; margin: 0; letter-spacing: -0.01em; }
+  .muted { color: var(--muted); }
+  .small { font-size: 0.85rem; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  button {
+    font: inherit;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    padding: 10px 14px;
+    cursor: pointer;
+  }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-text);
+    font-weight: 600;
+    width: 100%;
+    padding: 14px;
+    font-size: 1.05rem;
+  }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  label.check { display: flex; gap: 8px; align-items: center; font-size: 0.9rem; color: var(--muted); }
+  #msg { min-height: 1.4em; font-size: 0.9rem; }
+  #msg.err { color: var(--err); }
+  #msg.ok { color: var(--ok); }
+
+  .now { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .big { font-size: 2.6rem; font-weight: 650; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 1.1rem; font-weight: 500; color: var(--muted); margin-left: 2px; }
+  .temp { color: var(--temp); }
+  .hum { color: var(--hum); }
+  .stats { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
+
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 0.9rem; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 0.8rem; border: 1px solid currentColor; }
+  .pill.ok { color: var(--ok); }
+  .pill.warn { color: var(--warn); }
+
+  svg { display: block; width: 100%; height: auto; }
+  svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+  svg .grid { stroke: var(--line); stroke-width: 1; }
+  svg .tline { stroke: var(--temp); stroke-width: 2; fill: none; stroke-linejoin: round; }
+  svg .hline { stroke: var(--hum); stroke-width: 2; fill: none; stroke-linejoin: round; }
+  .legend { display: flex; gap: 16px; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
+  .legend span::before { content: ""; display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; background: currentColor; }
+  .legend .t { color: var(--temp); }
+  .legend .h { color: var(--hum); }
+  .legend span > em { color: var(--muted); font-style: normal; }
+
+  details summary { cursor: pointer; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; font-variant-numeric: tabular-nums; margin-top: 10px; }
+  th, td { padding: 6px 4px; text-align: right; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .tablewrap { max-height: 420px; overflow-y: auto; }
+  .hidden { display: none !important; }
+  .empty { text-align: center; padding: 28px 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>TH Logger</h1>
+    <span id="fetched" class="muted small"></span>
+  </header>
+
+  <div id="unsupported" class="card hidden">
+    <strong>This browser can't use Bluetooth.</strong>
+    <p class="muted small" style="margin:6px 0 0">
+      On Android, open this page in <strong>Chrome</strong>. On iPhone or iPad, use the free
+      <strong>Bluefy</strong> browser (Safari doesn't support Web Bluetooth). The page must be
+      served over HTTPS.
+    </p>
+  </div>
+
+  <section class="card" style="display:grid;gap:10px">
+    <button id="connect" class="primary">Connect</button>
+    <div class="row" style="justify-content:space-between">
+      <label class="check"><input type="checkbox" id="sync" checked> Set logger clock from this phone</label>
+    </div>
+    <div id="msg" class="muted">Press the button on the logger, then tap Connect.</div>
+  </section>
+
+  <section id="data" class="hidden" style="display:grid;gap:14px">
+    <div class="card now">
+      <div>
+        <div class="muted small">Temperature</div>
+        <div class="big temp" id="curT">–</div>
+        <div class="stats" id="statT"></div>
+      </div>
+      <div>
+        <div class="muted small">Humidity</div>
+        <div class="big hum" id="curH">–</div>
+        <div class="stats" id="statH"></div>
+      </div>
+      <div class="muted small" style="grid-column:1/-1" id="curTime"></div>
+    </div>
+
+    <div class="card">
+      <div class="legend"><span class="t">Temperature <em>°C</em></span><span class="h">Humidity <em>%</em></span></div>
+      <div id="chart"></div>
+    </div>
+
+    <div class="card">
+      <dl class="meta" id="meta"></dl>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>All readings</summary>
+        <div class="row" style="margin-top:10px">
+          <button id="csv">Download CSV</button>
+          <button id="share" class="hidden">Share</button>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Time</th><th>°C</th><th>%RH</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section id="empty" class="card empty muted hidden">No readings yet.</section>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// BLE protocol (see README.md)
+// ---------------------------------------------------------------------------
+const U = (id) => `7e1a${id}-5d3b-4c6a-9f2e-1c0a7b3d9e10`;
+const UUID = {
+  service: U("0000"), time: U("0001"), current: U("0002"),
+  cursor: U("0003"), history: U("0004"), status: U("0005"),
+};
+const MIN_VALID_EPOCH = 1577836800;
+const TEMP_ERROR = -32768, HUM_ERROR = 0xffff;
+const STORE_KEY = "th-logger-last";
+
+const $ = (id) => document.getElementById(id);
+const el = {
+  connect: $("connect"), sync: $("sync"), msg: $("msg"), data: $("data"), empty: $("empty"),
+  curT: $("curT"), curH: $("curH"), statT: $("statT"), statH: $("statH"), curTime: $("curTime"),
+  chart: $("chart"), meta: $("meta"), rows: $("rows"), csv: $("csv"), share: $("share"),
+  fetched: $("fetched"), unsupported: $("unsupported"),
+};
+
+let current = null;  // last result: { readings, status, clockOffset, synced, fetchedAt, demo }
+
+function setMsg(text, kind = "") {
+  el.msg.textContent = text;
+  el.msg.className = kind;
+}
+
+async function write(ch, data) {
+  return ch.writeValueWithResponse ? ch.writeValueWithResponse(data) : ch.writeValue(data);
+}
+
+async function fetchFromDevice(server, syncClock) {
+  const svc = await server.getPrimaryService(UUID.service);
+  const [chTime, chStatus, chCursor, chHistory] = await Promise.all(
+    [UUID.time, UUID.status, UUID.cursor, UUID.history].map((u) => svc.getCharacteristic(u)));
+
+  let synced = false;
+  if (syncClock) {
+    const buf = new DataView(new ArrayBuffer(4));
+    buf.setUint32(0, Math.floor(Date.now() / 1000), true);
+    await write(chTime, buf.buffer);
+    synced = true;
+  }
+
+  const devTime = (await chTime.readValue()).getUint32(0, true);
+  const clockOffset = devTime - Date.now() / 1000;   // + = logger ahead of phone
+
+  const st = await chStatus.readValue();
+  const status = {
+    clockSet: (st.getUint8(0) & 1) === 1,
+    interval: st.getUint16(1, true),
+    count: st.getUint8(3),
+    capacity: st.getUint8(4),
+    nextDue: st.getUint32(5, true),
+  };
+
+  const raw = [];
+  let cursor = 0;
+  for (;;) {
+    await write(chCursor, new Uint8Array([cursor]));
+    const v = await chHistory.readValue();
+    const total = v.getUint8(0), start = v.getUint8(1), n = v.getUint8(2);
+    for (let i = 0; i < n; i++) {
+      const o = 3 + i * 8;
+      const t = v.getInt16(o + 4, true), h = v.getUint16(o + 6, true);
+      raw.push({ ts: v.getUint32(o, true), t: t === TEMP_ERROR ? null : t / 100, h: h === HUM_ERROR ? null : h / 100 });
+    }
+    cursor = start + n;
+    if (n === 0 || cursor >= total) break;
+  }
+
+  // If the logger's clock was never set, its timestamps count from power-on.
+  // Place them on the phone's clock using the logger's current time.
+  const readings = raw.map((r) => ({
+    ...r,
+    ts: r.ts >= MIN_VALID_EPOCH ? r.ts : Math.round(Date.now() / 1000 - (devTime - r.ts)),
+  }));
+  if (status.nextDue < MIN_VALID_EPOCH) status.nextDue = Math.round(Date.now() / 1000 - (devTime - status.nextDue));
+
+  return { readings, status, clockOffset, synced, fetchedAt: Date.now() };
+}
+
+async function connect() {
+  if (!navigator.bluetooth) return;
+  el.connect.disabled = true;
+  let device;
+  try {
+    setMsg("Choose TH-Logger from the list…");
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [UUID.service] }, { name: "TH-Logger" }],
+      optionalServices: [UUID.service, 0x181a],
+    });
+    setMsg("Connecting…");
+    const server = await device.gatt.connect();
+    setMsg("Reading log…");
+    const result = await fetchFromDevice(server, el.sync.checked);
+    current = result;
+    save(result);
+    render(result);
+    setMsg(`Read ${result.readings.length} readings${result.synced ? " and set the clock" : ""}.`, "ok");
+  } catch (e) {
+    if (e && e.name === "NotFoundError") setMsg("No logger selected. Press the logger's button and try again.");
+    else setMsg(`Couldn't read the logger: ${e && e.message ? e.message : e}. It only advertises for a short time — press its button and try again.`, "err");
+  } finally {
+    // Disconnect straight away so the logger can go back to sleep.
+    try { if (device && device.gatt.connected) device.gatt.disconnect(); } catch (_) {}
+    el.connect.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const fmtDateTime = (ts) => new Date(ts * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+const fmt1 = (x) => (x == null ? "–" : x.toFixed(1));
+
+function ago(seconds) {
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h ago`;
+  return `${Math.round(seconds / 86400)} d ago`;
+}
+
+function render(res) {
+  const { readings, status } = res;
+  el.fetched.textContent = res.demo ? "Demo data" : `Updated ${fmtDateTime(res.fetchedAt / 1000)}`;
+  if (!readings.length) {
+    el.data.classList.add("hidden");
+    el.empty.classList.remove("hidden");
+    return;
+  }
+  el.empty.classList.add("hidden");
+  el.data.classList.remove("hidden");
+
+  const valid = readings.filter((r) => r.t != null);
+  const last = readings[readings.length - 1];
+  el.curT.innerHTML = last.t == null ? "–" : `${fmt1(last.t)}<small>°C</small>`;
+  el.curH.innerHTML = last.h == null ? "–" : `${fmt1(last.h)}<small>%</small>`;
+  el.curTime.textContent = `Latest reading ${fmtDateTime(last.ts)}` +
+    (last.t == null ? " · sensor error" : "");
+
+  if (valid.length) {
+    const ts = valid.map((r) => r.t), hs = valid.map((r) => r.h);
+    el.statT.textContent = `min ${fmt1(Math.min(...ts))} · max ${fmt1(Math.max(...ts))}`;
+    el.statH.textContent = `min ${fmt1(Math.min(...hs))} · max ${fmt1(Math.max(...hs))}`;
+  } else {
+    el.statT.textContent = el.statH.textContent = "";
+  }
+
+  el.chart.innerHTML = chartSvg(readings, status.interval || 900);
+
+  const errors = readings.length - valid.length;
+  const off = Math.abs(res.clockOffset);
+  const clock = res.synced
+    ? `<span class="pill ok">set from phone</span>`
+    : status.clockSet
+      ? (off < 60 ? `<span class="pill ok">within ${Math.max(1, Math.round(off))} s</span>`
+                  : `<span class="pill warn">${Math.round(off / 60)} min ${res.clockOffset > 0 ? "fast" : "slow"}</span>`)
+      : `<span class="pill warn">not set</span>`;
+  el.meta.innerHTML = `
+    <dt>Readings</dt><dd>${status.count} of ${status.capacity} (every ${Math.round(status.interval / 60)} min)</dd>
+    <dt>Covers</dt><dd>${fmtDateTime(readings[0].ts)} → ${fmtTime(last.ts)}</dd>
+    <dt>Next reading</dt><dd>${fmtTime(status.nextDue)}</dd>
+    <dt>Logger clock</dt><dd>${clock}</dd>
+    ${errors ? `<dt>Sensor errors</dt><dd>${errors}</dd>` : ""}`;
+
+  el.rows.innerHTML = readings.slice().reverse().map((r) =>
+    `<tr><td>${fmtDateTime(r.ts)}</td><td class="temp">${fmt1(r.t)}</td><td class="hum">${fmt1(r.h)}</td></tr>`).join("");
+}
+
+// Axis range of exactly `rows` round steps (0.5, 1, 2, 2.5, 5, 10, ...) covering min..max.
+function niceRange(min, max, rows, minStep) {
+  const steps = [1, 2, 2.5, 5, 10];
+  let mag = Math.pow(10, Math.floor(Math.log10(Math.max((max - min) / rows, minStep))));
+  for (;;) {
+    for (const s of steps) {
+      const step = Math.max(s * mag, minStep);
+      const lo = Math.floor(min / step) * step;
+      if (lo + step * rows >= max) return [lo, lo + step * rows];
+    }
+    mag *= 10;
+  }
+}
+
+function chartSvg(readings, interval) {
+  const W = 400, H = 230, L = 34, R = 34, T = 10, B = 24;
+  const pts = readings.filter((r) => r.t != null);
+  if (pts.length < 2) return `<p class="muted small">The chart appears after two readings.</p>`;
+
+  const x1 = pts[pts.length - 1].ts;
+  const x0 = Math.min(pts[0].ts, x1 - 6 * 3600);
+  const rows = 4;
+  const [t0, t1] = niceRange(Math.min(...pts.map((p) => p.t)), Math.max(...pts.map((p) => p.t)), rows, 0.5);
+  const [h0, h1] = niceRange(Math.min(...pts.map((p) => p.h)), Math.max(...pts.map((p) => p.h)), rows, 1);
+
+  const X = (ts) => L + ((ts - x0) / (x1 - x0)) * (W - L - R);
+  const YT = (v) => T + (1 - (v - t0) / (t1 - t0)) * (H - T - B);
+  const YH = (v) => T + (1 - (v - h0) / (h1 - h0)) * (H - T - B);
+
+  // Break the line where readings are missing (sensor error or gap in the log).
+  function path(key, Y) {
+    let d = "", prev = null;
+    for (const r of readings) {
+      if (r[key] == null) { prev = null; continue; }
+      const move = !prev || r.ts - prev.ts > interval * 1.6;
+      d += `${move ? "M" : "L"}${X(r.ts).toFixed(1)},${Y(r[key]).toFixed(1)}`;
+      prev = r;
+    }
+    return d;
+  }
+
+  let g = "";
+  for (let i = 0; i <= rows; i++) {
+    const y = T + (i / rows) * (H - T - B);
+    const tv = t1 - (i / rows) * (t1 - t0), hv = h1 - (i / rows) * (h1 - h0);
+    g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/>`;
+    g += `<text x="${L - 6}" y="${y + 4}" text-anchor="end">${+tv.toFixed(1)}</text>`;
+    g += `<text x="${W - R + 6}" y="${y + 4}">${Math.round(hv)}</text>`;
+  }
+  // Time ticks on whole hours, spaced to fit.
+  const span = x1 - x0, stepH = span > 12 * 3600 ? 6 : span > 6 * 3600 ? 3 : 1;
+  const first = new Date(x0 * 1000); first.setMinutes(0, 0, 0);
+  for (let t = first.getTime() / 1000 + 3600; t <= x1; t += 3600) {
+    const d = new Date(t * 1000);
+    if (d.getHours() % stepH) continue;
+    const x = X(t);
+    g += `<line class="grid" x1="${x}" x2="${x}" y1="${T}" y2="${H - B}" stroke-dasharray="2 3"/>`;
+    g += `<text x="${x}" y="${H - 6}" text-anchor="middle">${String(d.getHours()).padStart(2, "0")}:00</text>`;
+  }
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperature and humidity over the last 24 hours">
+    ${g}
+    <path class="hline" d="${path("h", YH)}"/>
+    <path class="tline" d="${path("t", YT)}"/>
+  </svg>`;
+}
+
+// ---------------------------------------------------------------------------
+// CSV / share / persistence
+// ---------------------------------------------------------------------------
+function csvText(res) {
+  const lines = ["time_utc,local_time,temp_c,humidity_pct"];
+  for (const r of res.readings) {
+    lines.push([new Date(r.ts * 1000).toISOString(), new Date(r.ts * 1000).toLocaleString().replace(/,/g, ""),
+                r.t ?? "", r.h ?? ""].join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function csvFile(res) {
+  const stamp = new Date(res.fetchedAt).toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  return new File([csvText(res)], `th-logger-${stamp}.csv`, { type: "text/csv" });
+}
+
+el.csv.addEventListener("click", () => {
+  if (!current) return;
+  const f = csvFile(current);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(f);
+  a.download = f.name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+el.share.addEventListener("click", async () => {
+  if (!current) return;
+  try { await navigator.share({ files: [csvFile(current)], title: "TH Logger readings" }); } catch (_) {}
+});
+try {
+  if (navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.csv", { type: "text/csv" })] }))
+    el.share.classList.remove("hidden");
+} catch (_) {}
+
+function save(res) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(res)); } catch (_) {}
+}
+
+function load() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch (_) { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Demo data (?demo) so the page can be previewed without a logger
+// ---------------------------------------------------------------------------
+function demoData() {
+  const now = Math.floor(Date.now() / 1000), step = 900;
+  const end = Math.floor(now / step) * step, readings = [];
+  for (let i = 95; i >= 0; i--) {
+    const ts = end - i * step, hr = new Date(ts * 1000).getHours() + new Date(ts * 1000).getMinutes() / 60;
+    const day = Math.sin(((hr - 9) / 24) * 2 * Math.PI);
+    const t = 20.5 + 2.4 * day + 0.15 * Math.sin(i * 1.7), h = 52 - 7 * day + 0.6 * Math.cos(i * 1.3);
+    readings.push(i === 30 ? { ts, t: null, h: null } : { ts, t: Math.round(t * 100) / 100, h: Math.round(h * 100) / 100 });
+  }
+  return { readings, demo: true, synced: false, clockOffset: 2, fetchedAt: Date.now(),
+           status: { clockSet: true, interval: step, count: 96, capacity: 96, nextDue: end + step } };
+}
+
+// ---------------------------------------------------------------------------
+if (!navigator.bluetooth) {
+  el.unsupported.classList.remove("hidden");
+  el.connect.disabled = true;
+  setMsg("");
+}
+el.connect.addEventListener("click", connect);
+
+if (new URLSearchParams(location.search).has("demo")) {
+  current = demoData();
+  render(current);
+} else {
+  const prev = load();
+  if (prev && prev.readings) {
+    current = prev;
+    render(prev);
+    setMsg(`Showing data from ${ago((Date.now() - prev.fetchedAt) / 1000)}. Press the logger's button, then Connect to refresh.`);
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+__pycache__/
+sdkconfig.esp32c6*
