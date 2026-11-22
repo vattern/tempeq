@@ -8,6 +8,8 @@
 #include "driver/usb_serial_jtag_vfs.h"
 
 #include "config.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "datalog.h"
 
 static char line[64];
@@ -36,24 +38,39 @@ static const char *fmt_centi(char *buf, size_t n, int32_t v, bool error) {
 }
 
 static void cmd_status(void) {
-  static reading_t log[TH_LOG_CAPACITY];
-  uint16_t count = datalog_snapshot(log);
-  printf("STATUS clock_set=%d now=%lu interval=%d count=%u capacity=%d next_due=%lu\n",
-         datalog_time_valid() ? 1 : 0, (unsigned long)datalog_now(), TH_LOG_INTERVAL_S, count,
-         TH_LOG_CAPACITY, (unsigned long)datalog_next_due(count ? &log[count - 1] : NULL));
+  datalog_flush();
+  uint32_t first, next;
+  datalog_range(&first, &next);
+  reading_t last;
+  bool have = datalog_latest(&last);
+  printf("STATUS clock_set=%d now=%lu interval=%d count=%lu first=%lu next=%lu capacity=%lu next_due=%lu\n",
+         datalog_time_valid() ? 1 : 0, (unsigned long)datalog_now(), TH_LOG_INTERVAL_S,
+         (unsigned long)(next - first), (unsigned long)first, (unsigned long)next,
+         (unsigned long)datalog_capacity(), (unsigned long)datalog_next_due(have ? &last : NULL));
   printf("OK\n");
 }
 
-static void cmd_dump(void) {
-  static reading_t log[TH_LOG_CAPACITY];
-  uint16_t count = datalog_snapshot(log);
+// dump [from]: readings with record number >= from (default: all)
+static void cmd_dump(uint32_t from) {
+  datalog_flush();
+  static reading_t page[64];
+  uint32_t first, next, start;
+  datalog_range(&first, &next);
   char t[12], h[12];
   printf("ts,temp_c,humidity_pct\n");
-  for (uint16_t i = 0; i < count; i++) {
-    const reading_t *r = &log[i];
-    printf("%lu,%s,%s\n", (unsigned long)r->ts,
-           fmt_centi(t, sizeof(t), r->temp, r->temp == TH_TEMP_ERROR),
-           fmt_centi(h, sizeof(h), r->hum, r->hum == TH_HUM_ERROR));
+  uint32_t pos = from;
+  for (;;) {
+    uint16_t n = datalog_read(pos, page, 64, &start);
+    if (n == 0) break;
+    for (uint16_t i = 0; i < n; i++) {
+      const reading_t *r = &page[i];
+      printf("%lu,%s,%s\n", (unsigned long)r->ts,
+             fmt_centi(t, sizeof(t), r->temp, r->temp == TH_TEMP_ERROR),
+             fmt_centi(h, sizeof(h), r->hum, r->hum == TH_HUM_ERROR));
+    }
+    pos = start + n;
+    if (pos >= next) break;
+    vTaskDelay(1);  // long dumps: let the idle task run (task watchdog)
   }
   printf("OK\n");
 }
@@ -63,7 +80,12 @@ static void handle(char *cmd) {
   if (strcmp(cmd, "status") == 0) {
     cmd_status();
   } else if (strcmp(cmd, "dump") == 0) {
-    cmd_dump();
+    cmd_dump(0);
+  } else if (strncmp(cmd, "dump ", 5) == 0) {
+    cmd_dump((uint32_t)strtoul(cmd + 5, NULL, 10));
+  } else if (strcmp(cmd, "clear") == 0) {
+    datalog_clear();
+    printf("OK\n");
   } else if (strncmp(cmd, "time ", 5) == 0) {
     char *end;
     unsigned long t = strtoul(cmd + 5, &end, 10);
@@ -74,7 +96,7 @@ static void handle(char *cmd) {
       printf("OK\n");
     }
   } else if (strcmp(cmd, "help") == 0) {
-    printf("commands: status | dump | time <unix> | help\nOK\n");
+    printf("commands: status | dump [from] | time <unix> | clear | help\nOK\n");
   } else {
     printf("ERR unknown command '%s' (try help)\n", cmd);
   }

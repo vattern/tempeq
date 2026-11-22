@@ -25,19 +25,22 @@ static const char *TAG = "ble";
 static const ble_uuid128_t uuid_service = TH_UUID(0x00);
 static const ble_uuid128_t uuid_time = TH_UUID(0x01);      // R/W uint32 unix time
 static const ble_uuid128_t uuid_current = TH_UUID(0x02);   // R   latest record
-static const ble_uuid128_t uuid_cursor = TH_UUID(0x03);    // R/W uint8 history start index
+static const ble_uuid128_t uuid_cursor = TH_UUID(0x03);    // R/W uint32 history start record number
 static const ble_uuid128_t uuid_history = TH_UUID(0x04);   // R   page of records
-static const ble_uuid128_t uuid_status = TH_UUID(0x05);    // R   flags/interval/count/...
+static const ble_uuid128_t uuid_status = TH_UUID(0x05);    // R   flags/interval/range/...
+static const ble_uuid128_t uuid_control = TH_UUID(0x06);   // W   commands (0x01 = clear log)
 
-enum { CH_TIME, CH_CURRENT, CH_CURSOR, CH_HISTORY, CH_STATUS, CH_ESS_TEMP, CH_ESS_HUM };
+#define CTRL_CLEAR 0x01
+
+enum { CH_TIME, CH_CURRENT, CH_CURSOR, CH_HISTORY, CH_STATUS, CH_CONTROL, CH_ESS_TEMP, CH_ESS_HUM };
 
 static volatile bool connected;
 static volatile bool synced;
 static volatile bool adv_wanted;
-static volatile int64_t connected_at_us;
+static volatile int64_t last_activity_us;
 static uint16_t conn_handle;
 static uint8_t own_addr_type;
-static uint8_t hist_cursor;
+static uint32_t hist_cursor;
 
 static void advertise(void);
 
@@ -58,8 +61,8 @@ static int append(struct os_mbuf *om, const void *data, size_t len) {
 }
 
 static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
-  static reading_t log[TH_LOG_CAPACITY];
   int ch = (int)(intptr_t)arg;
+  last_activity_us = esp_timer_get_time();
 
   if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
     uint8_t buf[4];
@@ -71,8 +74,13 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
       return 0;
     }
     if (ch == CH_CURSOR) {
-      if (len != 1) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-      hist_cursor = buf[0];
+      if (len != 4) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+      hist_cursor = buf[0] | (buf[1] << 8) | (buf[2] << 16) | ((uint32_t)buf[3] << 24);
+      return 0;
+    }
+    if (ch == CH_CONTROL) {
+      if (len != 1 || buf[0] != CTRL_CLEAR) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+      datalog_clear();
       return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -80,8 +88,9 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
 
   if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
 
-  uint16_t count = datalog_snapshot(log);
-  const reading_t *latest = count ? &log[count - 1] : NULL;
+  datalog_flush();
+  reading_t last;
+  const reading_t *latest = datalog_latest(&last) ? &last : NULL;
 
   switch (ch) {
     case CH_TIME: {
@@ -94,27 +103,41 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
       if (latest) encode_reading(buf, latest);
       return append(ctxt->om, buf, sizeof(buf));
     }
-    case CH_CURSOR:
-      return append(ctxt->om, &hist_cursor, 1);
+    case CH_CURSOR: {
+      uint8_t buf[4];
+      put32(buf, hist_cursor);
+      return append(ctxt->om, buf, sizeof(buf));
+    }
     case CH_HISTORY: {
-      // [total u8][start u8][n u8] + n * 8-byte records, oldest first.
-      static uint8_t buf[3 + HISTORY_PAGE_SIZE * 8];
-      uint8_t start = hist_cursor > count ? count : hist_cursor;
-      uint8_t n = count - start > HISTORY_PAGE_SIZE ? HISTORY_PAGE_SIZE : count - start;
-      buf[0] = count;
-      buf[1] = start;
-      buf[2] = n;
-      for (int i = 0; i < n; i++) encode_reading(buf + 3 + i * 8, &log[start + i]);
-      return append(ctxt->om, buf, 3 + n * 8);
+      // [next u32][start u32][n u8] + n * 8-byte records, oldest first.
+      // Long reads arrive as several calls with increasing offsets; build the
+      // page once and serve every chunk of the same read from it.
+      static uint8_t buf[9 + HISTORY_PAGE_SIZE * 8];
+      static uint16_t len;
+      if (ctxt->offset == 0 || len == 0) {
+        static reading_t page[HISTORY_PAGE_SIZE];
+        uint32_t first, next, start;
+        datalog_range(&first, &next);
+        uint16_t n = datalog_read(hist_cursor, page, HISTORY_PAGE_SIZE, &start);
+        put32(buf, next);
+        put32(buf + 4, start);
+        buf[8] = (uint8_t)n;
+        for (int i = 0; i < n; i++) encode_reading(buf + 9 + i * 8, &page[i]);
+        len = 9 + n * 8;
+      }
+      return append(ctxt->om, buf, len);
     }
     case CH_STATUS: {
-      // [flags u8 (bit0 = clock set)][interval_s u16][count u8][capacity u8][next_due u32]
-      uint8_t buf[9];
+      // [flags u8 (bit0 = clock set)][interval_s u16][first u32][next u32][capacity u32][next_due u32]
+      uint8_t buf[19];
+      uint32_t first, next;
+      datalog_range(&first, &next);
       buf[0] = datalog_time_valid() ? 0x01 : 0x00;
       put16(buf + 1, TH_LOG_INTERVAL_S);
-      buf[3] = count;
-      buf[4] = TH_LOG_CAPACITY;
-      put32(buf + 5, datalog_next_due(latest));
+      put32(buf + 3, first);
+      put32(buf + 7, next);
+      put32(buf + 11, datalog_capacity());
+      put32(buf + 15, datalog_next_due(latest));
       return append(ctxt->om, buf, sizeof(buf));
     }
     case CH_ESS_TEMP: {  // org.bluetooth.characteristic.temperature, sint16 0.01 degC
@@ -144,6 +167,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             CHR(&uuid_cursor, CH_CURSOR, BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE),
             CHR(&uuid_history, CH_HISTORY, BLE_GATT_CHR_F_READ),
             CHR(&uuid_status, CH_STATUS, BLE_GATT_CHR_F_READ),
+            CHR(&uuid_control, CH_CONTROL, BLE_GATT_CHR_F_WRITE),
             {0},
         },
     },
@@ -168,7 +192,7 @@ static int gap_event(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_CONNECT:
       if (event->connect.status == 0) {
         conn_handle = event->connect.conn_handle;
-        connected_at_us = esp_timer_get_time();
+        last_activity_us = esp_timer_get_time();
         connected = true;
         ESP_LOGI(TAG, "Connected");
       } else {
@@ -252,8 +276,8 @@ void ble_set_advertising(bool on) {
   if (!on) ble_gap_adv_stop();
 }
 
-int64_t ble_connected_for_us(void) {
-  return connected ? esp_timer_get_time() - connected_at_us : -1;
+int64_t ble_idle_us(void) {
+  return connected ? esp_timer_get_time() - last_activity_us : -1;
 }
 
 void ble_stop(void) {

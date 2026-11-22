@@ -1,6 +1,7 @@
 // LP-core program: runs every TH_LOG_INTERVAL_S (woken by the LP timer),
-// reads the AHT21 over bit-banged I2C, appends to a ring buffer in LP SRAM and
-// optionally wakes the main core. Runs for ~100 ms per reading; the main core
+// reads the AHT21 over bit-banged I2C, appends to a staging ring buffer in LP
+// SRAM and wakes the main core when it is due a BLE window or the ring needs
+// emptying into flash. Runs for ~100 ms per reading; the main core
 // and radio stay in deep sleep throughout.
 //
 // Every global here is visible to the HP core as `ulp_<name>`.
@@ -17,11 +18,12 @@
 #define AHT_ADDR      0x38
 
 // ---- Shared with the HP core ----------------------------------------------
-volatile th_record_t log_buf[TH_LOG_CAPACITY];
-volatile uint32_t log_head;     // next write index
-volatile uint32_t log_count;
-volatile uint32_t log_seq;      // seqlock: odd while a record is being written
-volatile uint32_t wake_every_n; // set by HP: wake main core every N readings (0 = never)
+volatile th_record_t log_buf[TH_LP_RING_CAPACITY];
+volatile uint32_t log_total;     // readings ever taken; record i is at log_buf[i % capacity]
+volatile uint32_t flushed_total; // set by HP: readings already moved to flash
+volatile uint32_t log_seq;       // seqlock: odd while a record is being written
+volatile uint32_t wake_every_n;  // set by HP: wake main core every N readings (0 = never)
+volatile uint32_t wake_reason;   // TH_WAKE_* for the last wake we triggered
 volatile uint32_t readings_since_wake;
 volatile uint32_t sensor_powered_up;
 // Diagnostics: 0 ok, 1 no ACK to status read (not connected / wiring / pull-ups),
@@ -186,18 +188,22 @@ int main(void) {
     hum = TH_HUM_ERROR;
   }
 
-  uint32_t head = log_head;
+  uint32_t total = log_total;
+  uint32_t head = total % TH_LP_RING_CAPACITY;
   log_seq++;
   log_buf[head].ticks_lo = (uint32_t)ticks;
   log_buf[head].ticks_hi = (uint32_t)(ticks >> 32);
   log_buf[head].temp = temp;
   log_buf[head].hum = hum;
-  log_head = (head + 1) % TH_LOG_CAPACITY;
-  if (log_count < TH_LOG_CAPACITY) log_count++;
+  log_total = total + 1;
   log_seq++;
 
   if (wake_every_n && ++readings_since_wake >= wake_every_n) {
     readings_since_wake = 0;
+    wake_reason = TH_WAKE_BLE;
+    ulp_lp_core_wakeup_main_processor();
+  } else if (log_total - flushed_total >= TH_LP_RING_CAPACITY - TH_LP_FLUSH_MARGIN) {
+    wake_reason = TH_WAKE_FLUSH;
     ulp_lp_core_wakeup_main_processor();
   }
   return 0;  // LP core halts; the LP timer wakes it again next interval

@@ -8,5 +8,5 @@ idf_component_register(
 # to the HP side as ulp_<name> via the generated ulp_main.h.
 set(ulp_app_name ulp_main)
 set(ulp_sources "../ulp/main.c")
-set(ulp_exp_dep_srcs "datalog.c")
+set(ulp_exp_dep_srcs "datalog.c" "main.c")
 ulp_embed_binary(${ulp_app_name} "${ulp_sources}" "${ulp_exp_dep_srcs}")

@@ -3,9 +3,12 @@
 
 // Line-based command interface on the USB-Serial-JTAG port (the console).
 //
-//   status        -> STATUS clock_set=<0|1> now=<unix> interval=<s> count=<n> capacity=<n> next_due=<unix>
-//   dump          -> ts,temp_c,humidity_pct  header, then one CSV line per reading (oldest first)
+//   status        -> STATUS clock_set=<0|1> now=<unix> interval=<s> count=<n> first=<n> next=<n>
+//                           capacity=<n> next_due=<unix>
+//   dump [from]   -> ts,temp_c,humidity_pct  header, then one CSV line per reading (oldest first),
+//                    optionally only record numbers >= from
 //   time <unix>   -> set the clock (UTC)
+//   clear         -> delete all readings
 //   help
 //
 // Every command ends with a line "OK" or "ERR <reason>". Other lines (e.g. log

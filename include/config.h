@@ -11,7 +11,7 @@
 // Hardware
 // ---------------------------------------------------------------------------
 // Board: Seeed XIAO ESP32-C6.
-// AHT21 I2C pins are in th_shared.h (SDA = D1/GPIO1, SCL = D2/GPIO2).
+// AHT21 I2C pins are in th_shared.h (SDA = D2/GPIO2, SCL = D1/GPIO1).
 
 // Optional push-button (to GND) that wakes the main core and opens a long BLE
 // window. Must be an LP GPIO; on the XIAO that leaves D0 (GPIO0).
@@ -28,19 +28,20 @@
 // BLE availability (the dominant power cost - tune for your battery)
 // ---------------------------------------------------------------------------
 // The LP core wakes the main core after every N readings to advertise for
-// BLE_WINDOW_AFTER_WAKE_MS. 4 = once an hour. 0 = never (button only, lowest power).
-#define BLE_WAKE_EVERY_N_READINGS     4
+// BLE_WINDOW_AFTER_WAKE_MS (and move readings to flash). 6 = once an hour.
+// 0 = never (button only, lowest power; readings still reach flash daily).
+#define BLE_WAKE_EVERY_N_READINGS     6
 #define BLE_WINDOW_AFTER_WAKE_MS      5000
 // Advertise for this long after a button press or power-on.
 #define BLE_WINDOW_BUTTON_MS          60000
-// Hard cap on how long a client may stay connected before we go to sleep.
-#define BLE_MAX_CONNECTED_MS          120000
+// Go to sleep once a connected client has made no requests for this long.
+#define BLE_MAX_IDLE_MS               30000
 // Advertising interval (units of 0.625 ms). 160 = 100 ms.
 #define BLE_ADV_INTERVAL              160
 
 #define BLE_DEVICE_NAME    "TH-Logger"
 
-// Records per history page. 60 * 8 + 3 = 483 bytes (< 512 byte ATT limit).
+// Records per history page. 9 + 60 * 8 = 489 bytes (< 512 byte ATT limit).
 #define HISTORY_PAGE_SIZE  60
 
 // Any unix time before this is considered "clock not set" (2020-01-01).

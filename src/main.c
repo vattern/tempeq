@@ -1,15 +1,17 @@
 // Ultra-low-power Seeed XIAO ESP32-C6 + AHT21 temperature/humidity logger.
 //
-// The LP core (ulp/main.c) does all the logging: every 15 minutes the LP timer
-// wakes it, it reads the AHT21 over bit-banged I2C and stores the result in LP SRAM.
-// This main core only wakes to serve BLE (and USB):
+// The LP core (ulp/main.c) takes the readings: every TH_LOG_INTERVAL_S the LP
+// timer wakes it, it reads the AHT21 over bit-banged I2C and stages the result in
+// LP SRAM. This main core moves staged readings to the flash log every time it
+// wakes, and serves BLE (and USB). It wakes:
 //   - after a button press (long window),
 //   - when the LP core wakes it every BLE_WAKE_EVERY_N_READINGS readings,
+//   - when the LP staging buffer is nearly full (flash only, no BLE),
 //   - on power-on (to start the LP core and give a window to set the clock).
 // If a USB host is attached during that window, it stays awake (and keeps
 // advertising) until the cable is unplugged, serving commands on the USB
 // serial port (see usb_cmd.h).
-// The log survives deep sleep but is lost on power loss / hard reset.
+// The flash log survives power loss; readings still in LP SRAM do not.
 
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
@@ -24,6 +26,7 @@
 #include "config.h"
 #include "datalog.h"
 #include "usb_cmd.h"
+#include "ulp_main.h"
 
 static const char *TAG = "main";
 
@@ -72,16 +75,18 @@ static void serve(uint32_t window_ms) {
       usb_was_connected = usb;
     }
     if (usb) usb_cmd_poll();
+    datalog_flush();  // readings taken while we stay awake
 
     bool window_open = esp_timer_get_time() < window_end;
-    int64_t ble_conn = ble_connected_for_us();
-    bool ble_busy = ble_conn >= 0 && ble_conn < (int64_t)BLE_MAX_CONNECTED_MS * 1000;
+    int64_t idle = ble_idle_us();
+    bool ble_busy = idle >= 0 && idle < (int64_t)BLE_MAX_IDLE_MS * 1000;
     if (!window_open && !usb && !ble_busy) break;
 
     ble_set_advertising(window_open || usb);
     vTaskDelay(pdMS_TO_TICKS(20));
   }
   ble_stop();
+  datalog_flush();
 }
 
 void app_main(void) {
@@ -100,23 +105,26 @@ void app_main(void) {
   bool cold_boot = esp_reset_reason() != ESP_RST_DEEPSLEEP;
   ESP_LOGI(TAG, "Wake cause %d, cold boot %d", cause, cold_boot);
 
+  // NVS holds the RF calibration and the log's power-on counter / clock offsets.
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    nvs_flash_init();
+  }
+  datalog_init(cold_boot);
+
   uint32_t window = BLE_WINDOW_BUTTON_MS;
   if (cold_boot) {
     datalog_start_lp_core();
   } else if (cause == ESP_SLEEP_WAKEUP_ULP) {
     datalog_realign_after_reading();
-    window = BLE_WINDOW_AFTER_WAKE_MS;
+    window = ulp_wake_reason == TH_WAKE_FLUSH ? 0 : BLE_WINDOW_AFTER_WAKE_MS;
   }
 
+  datalog_flush();
   datalog_log_status();
 
   if (window > 0) {
-    // NVS holds the RF calibration; without it every wake does a full (slower) calibration.
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      nvs_flash_erase();
-      nvs_flash_init();
-    }
     gpio_hold_dis(PIN_RF_SWITCH_EN);
     rf_switch(true);
     serve(window);

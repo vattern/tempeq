@@ -1,0 +1,7 @@
+# XIAO ESP32-C6, 4 MB flash.
+# thlog: ring buffer of readings (12 bytes each, ~212k readings = ~4 years at 10 min).
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x6000
+phy_init,   data, phy,     0xf000,   0x1000
+factory,    app,  factory, 0x10000,  0x180000
+thlog,      data, 0x40,    0x190000, 0x270000

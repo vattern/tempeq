@@ -8,8 +8,9 @@ void ble_start(void);
 // Turn advertising on/off (a connected client is not affected).
 void ble_set_advertising(bool on);
 
-// How long the current client has been connected, or -1 if none.
-int64_t ble_connected_for_us(void);
+// Time since the current client connected or last made a request, or -1 if
+// no client is connected.
+int64_t ble_idle_us(void);
 
 // Disconnect any client and shut BLE down.
 void ble_stop(void);
