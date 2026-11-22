@@ -159,7 +159,9 @@ asserted (`th_client.py` does), or use a terminal that doesn't toggle them.
 a chart (24 h, 7 d, 30 d or everything), min/max values and a table. It sets the
 logger's clock, exports every reading as CSV, and can clear the logger. It keeps a copy
 of what it has read, so after the first time it only fetches new readings and still
-shows the data offline. It disconnects as soon as it has read the data, so the logger
+shows the data offline. To re-read readings that are already on the phone, pick
+**last 24 h / 2 days / 7 days / everything again** under *Download* before tapping
+Connect. It disconnects as soon as it has read the data, so the logger
 can sleep again.
 
 - **Android:** Chrome. **iPhone/iPad:** the free Bluefy browser (Safari has no Web Bluetooth).

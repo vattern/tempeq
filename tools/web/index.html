@@ -80,6 +80,8 @@
   button:disabled { opacity: 0.55; cursor: default; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   label.check { display: flex; gap: 8px; align-items: center; font-size: 0.9rem; color: var(--muted); }
+  label.pick { display: flex; gap: 8px; align-items: center; font-size: 0.9rem; color: var(--muted); }
+  select { font: inherit; font-size: 0.9rem; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
   #msg { min-height: 1.4em; font-size: 0.9rem; }
   #msg.err { color: var(--err); }
   #msg.ok { color: var(--ok); }
@@ -146,6 +148,15 @@
     <button id="connect" class="primary">Connect</button>
     <div class="row" style="justify-content:space-between">
       <label class="check"><input type="checkbox" id="sync" checked> Set logger clock from this phone</label>
+      <label class="pick">Download
+        <select id="fetchMode">
+          <option value="0">new readings</option>
+          <option value="1">last 24 h again</option>
+          <option value="2">last 2 days again</option>
+          <option value="7">last 7 days again</option>
+          <option value="all">everything again</option>
+        </select>
+      </label>
     </div>
     <div id="msg" class="muted">Press the button on the logger, then tap Connect.</div>
   </section>
@@ -224,7 +235,7 @@ const CHART_MAX_POINTS = 600;
 
 const $ = (id) => document.getElementById(id);
 const el = {
-  connect: $("connect"), sync: $("sync"), msg: $("msg"), data: $("data"), empty: $("empty"),
+  connect: $("connect"), sync: $("sync"), fetchMode: $("fetchMode"), msg: $("msg"), data: $("data"), empty: $("empty"),
   curT: $("curT"), curH: $("curH"), statT: $("statT"), statH: $("statH"), curTime: $("curTime"),
   chart: $("chart"), meta: $("meta"), rows: $("rows"), rowsNote: $("rowsNote"), csv: $("csv"),
   share: $("share"), clear: $("clear"), range: $("range"), fetched: $("fetched"), unsupported: $("unsupported"),
@@ -281,8 +292,9 @@ async function withLogger(fn) {
   }
 }
 
-// Reads only the readings not already in `cached` (if it still matches the logger).
-async function fetchFromDevice(svc, syncClock, cached) {
+// Reads the readings not already in `cached` (if it still matches the logger).
+// `forceDays` > 0 re-reads that many days of readings even if cached (Infinity: all).
+async function fetchFromDevice(svc, syncClock, cached, forceDays = 0) {
   const [chTime, chStatus, chCursor, chHistory] = await Promise.all(
     [UUID.time, UUID.status, UUID.cursor, UUID.history].map((u) => svc.getCharacteristic(u)));
 
@@ -297,11 +309,21 @@ async function fetchFromDevice(svc, syncClock, cached) {
   const status = await readStatus(chStatus);
   const { first, next } = status;
 
-  // Keep cached readings the logger still has; fetch the rest.
-  let readings = [], cursor = first;
-  if (cached && !cached.demo && cached.first <= first && first <= cached.next && cached.next <= next) {
-    readings = cached.readings.slice(first - cached.first);
-    cursor = cached.next;
+  // Keep cached readings the logger still has (cache must end inside the logger's
+  // range); fetch the rest. The phone may hold only the newer part of the log.
+  const usable = cached && !cached.demo && Array.isArray(cached.readings) &&
+    cached.first <= cached.next && first <= cached.next && cached.next <= next;
+  let cursor = usable ? cached.next : first;
+  if (forceDays === Infinity) cursor = first;
+  else if (forceDays > 0) {
+    const perDay = Math.round(86400 / (status.interval || 600));
+    const windowStart = Math.max(first, next - Math.ceil(forceDays * perDay));
+    cursor = usable ? Math.min(cursor, windowStart) : windowStart;
+  }
+  let readings = [], readFirst = cursor;
+  if (usable && cached.first <= cursor) {
+    readFirst = Math.max(first, cached.first);
+    readings = cached.readings.slice(readFirst - cached.first, cursor - cached.first);
   }
   const fetchTotal = next - cursor;
 
@@ -327,23 +349,27 @@ async function fetchFromDevice(svc, syncClock, cached) {
   }
   if (status.nextDue < MIN_VALID_EPOCH) status.nextDue = Math.round(Date.now() / 1000 - (devTime - status.nextDue));
 
-  return { readings, first, next: first + readings.length, status, clockOffset, synced, fetchedAt: Date.now(), fetched };
+  return { readings, first: readFirst, next: readFirst + readings.length, status, clockOffset, synced,
+           fetchedAt: Date.now(), fetched };
 }
 
 async function connect() {
   if (!navigator.bluetooth) return;
   setBusy(true);
   try {
+    const mode = el.fetchMode.value;
+    const forceDays = mode === "all" ? Infinity : +mode;
     const result = await withLogger(async (svc) => {
       setMsg("Reading log…");
-      return fetchFromDevice(svc, el.sync.checked, current);
+      return fetchFromDevice(svc, el.sync.checked, current, forceDays);
     });
+    el.fetchMode.value = "0";  // forcing is a one-off
     current = result;
     save(result);
     render(result);
     const what = result.fetched === result.readings.length
       ? `Read ${result.readings.length} readings`
-      : `Read ${result.fetched} new readings (${result.readings.length} in total)`;
+      : `Read ${result.fetched} readings (${result.readings.length} on this phone)`;
     setMsg(`${what}${result.synced ? " and set the clock" : ""}.`, "ok");
   } catch (e) {
     showError(e);
@@ -458,6 +484,8 @@ function render(res) {
   const used = status.capacity ? ` · ${(100 * readings.length / status.capacity).toFixed(readings.length * 1000 < status.capacity ? 2 : 1)}% full` : "";
   el.meta.innerHTML = `
     <dt>Readings</dt><dd>${readings.length.toLocaleString()} (every ${Math.round(status.interval / 60)} min)${used}</dd>
+    ${status.first != null && res.first > status.first
+      ? `<dt>Not downloaded</dt><dd>${(res.first - status.first).toLocaleString()} older readings on the logger (choose “everything again”)</dd>` : ""}
     ${known.length ? `<dt>Covers</dt><dd>${fmtDateTime(known[0].ts)} → ${fmtDateTime(endTs)} (${spanText(endTs - known[0].ts)})</dd>` : ""}
     <dt>Next reading</dt><dd>${fmtTime(status.nextDue)}</dd>
     <dt>Logger clock</dt><dd>${clock}</dd>
