@@ -29,9 +29,10 @@
 // ---------------------------------------------------------------------------
 // The LP core wakes the main core after every N readings to advertise for
 // BLE_WINDOW_AFTER_WAKE_MS (and move readings to flash). 6 = once an hour.
-// 0 = never (button only, lowest power; readings still reach flash daily).
-#define BLE_WAKE_EVERY_N_READINGS     6
-#define BLE_WINDOW_AFTER_WAKE_MS      5000
+// 0 = never: BLE only after a D0 button press (lowest power). Readings still
+// reach flash about once a day, when the LP staging buffer is nearly full.
+#define BLE_WAKE_EVERY_N_READINGS     0
+#define BLE_WINDOW_AFTER_WAKE_MS      30000
 // Advertise for this long after a button press or power-on.
 #define BLE_WINDOW_BUTTON_MS          60000
 // Go to sleep once a connected client has made no requests for this long.

@@ -4,7 +4,7 @@ Battery-powered logger that takes a reading every 10 minutes, stores them in fla
 (about 4 years' worth, kept through power loss), and serves them over BLE and USB.
 
 The readings are taken by the C6's **LP (low-power) RISC-V core**, which bit-bangs I²C. The
-main core and radio stay in deep sleep. They wake about once an hour to move the new
+main core and radio stay in deep sleep. They wake when the D0 button is pressed, and about once a day to move the new
 readings to flash and serve BLE.
 
 ## Wiring
@@ -66,13 +66,13 @@ LP core (ulp/main.c)                       HP core (src/)
 ```
 
 - **Storage:** readings are staged in LP SRAM (room for 24 h) and moved to the
-  `thlog` flash partition every time the main core wakes: on every BLE wake, on a
-  button press, and while it stays awake. If BLE wakes are turned off, the LP core
-  still wakes the main core when the staging buffer is nearly full, just to move
-  the readings. The flash log is a ring of 4 KB sectors holding about 212,000
+  `thlog` flash partition every time the main core wakes: on a button press, on
+  any regular BLE wake, and while it stays awake. Otherwise the LP core wakes the
+  main core when the staging buffer is nearly full (about once a day), just to
+  move the readings. The flash log is a ring of 4 KB sectors holding about 212,000
   readings (about 4 years). When full, the oldest sector (340 readings) is
-  overwritten. Readings still in LP SRAM are lost if power is removed, at most
-  the last hour by default.
+  overwritten. Readings still in LP SRAM are lost if power is removed: up to about
+  a day's worth by default (an hour with hourly BLE wakes).
 
 - **Timestamps:** the LP core records the LP-timer tick count. The main core converts
   it to unix time when it moves the reading to flash. Readings taken before the
@@ -84,9 +84,11 @@ LP core (ulp/main.c)                       HP core (src/)
 - **Slot alignment:** once the clock is set, the HP core reprograms the LP timer so
   readings fall on whole 10-minute slots. It corrects drift every time it wakes.
 - **BLE availability** (`include/config.h`):
-  - After every `BLE_WAKE_EVERY_N_READINGS` readings (default 6, so once an hour),
-    the device advertises for `BLE_WINDOW_AFTER_WAKE_MS` (5 s).
-  - After a button press or power-on, it advertises for `BLE_WINDOW_BUTTON_MS` (60 s).
+  - By default BLE runs **only after a D0 button press** (or power-on): the device
+    advertises for `BLE_WINDOW_BUTTON_MS` (60 s).
+  - Optional regular windows: set `BLE_WAKE_EVERY_N_READINGS` (e.g. 6 = once an hour)
+    and the device advertises for `BLE_WINDOW_AFTER_WAKE_MS` (30 s) after every N
+    readings. Default `0` = off.
   - It stays awake while a client is connected and making requests. It goes back to
     sleep after `BLE_MAX_IDLE_MS` (30 s) without one.
 
@@ -178,6 +180,28 @@ can sleep again.
   unless renamed). **Rename logger…** changes the name it advertises as.
 - Add `?demo` to the URL to preview the page with made-up data.
 
+### Android app
+
+`android/` is a native Kotlin / Jetpack Compose app (Android 12 or later). It does what the
+web page does: chart, min/max, CSV export, rename, clear, several loggers. It also has
+**background sync**: once it's switched on, the phone runs a low-power BLE scan filtered on
+the logger's service UUID. The system keeps that scan running even when the app is closed.
+When a logger starts advertising (press its D0 button), the app connects, sets the clock,
+fetches only the new readings and disconnects. Readings are kept in a SQLite database on
+the phone.
+
+```sh
+cd android
+./gradlew assembleDebug          # app/build/outputs/apk/debug/app-debug.apk
+./gradlew installDebug           # onto a phone connected with USB debugging
+```
+
+It needs the Android SDK (set `sdk.dir` in `android/local.properties` or `ANDROID_HOME`), or
+open `android/` in Android Studio. So with background sync on, pressing D0 is enough: the
+phone picks the logger up within its 60 s window without opening the app. Some
+phone makers' battery savers stop background work anyway; exempting the app from battery
+optimisation helps.
+
 ### Host tool (Bluetooth)
 
 ```sh
@@ -198,11 +222,12 @@ readings in 15–30 s. USB is much faster for large logs.
 
 - **Logging cost:** the main core never wakes to take a reading. The LP core runs for
   about 100 ms every 10 minutes, a tiny fraction of the cost of booting the main core.
-  Moving readings to flash adds a few milliseconds to each hourly wake.
-- **BLE windows are now the main power cost.** A 5 s window costs about 20–30 mA × 5 s.
-  At the default of once an hour that is roughly 1 mAh/day. Set
-  `BLE_WAKE_EVERY_N_READINGS` to `0` to advertise only after a button press. Then the
-  average current is close to the deep-sleep floor.
+  Moving readings to flash adds a few milliseconds to each wake.
+- **BLE is the main power cost, so by default it only runs after a button press.** The
+  main core otherwise wakes only about once a day to move readings to flash, and the
+  average current is close to the deep-sleep floor. Regular windows
+  (`BLE_WAKE_EVERY_N_READINGS = 6`) with a 30 s window cost about 20–30 mA × 30 s each,
+  roughly 5 mAh/day.
 - Deep sleep with the LP timer running is around 7–10 µA for the C6 plus about 0.25 µA
   for the AHT21. Dev boards add their own regulator and LED quiescent current, which is
   often far higher. For long battery life, use a bare module or remove the power LED and
