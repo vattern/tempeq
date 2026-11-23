@@ -202,6 +202,32 @@ phone picks the logger up within its 60 s window without opening the app. Some
 phone makers' battery savers stop background work anyway; exempting the app from battery
 optimisation helps.
 
+**Releases:** pushing a version tag builds a signed APK and publishes it as a GitHub
+Release (`.github/workflows/android-release.yml`):
+
+```sh
+git tag v0.2 && git push origin v0.2
+```
+
+Install it on any Android 12+ phone by downloading the APK from the Releases page (allow
+installs from unknown sources), or add the repository URL to
+[Obtainium](https://github.com/ImranR98/Obtainium) to get updates automatically. The
+version code comes from the tag (`v1.2.3` → 10203), so each tag must be higher than the
+last. A phone with a debug build from `installDebug` must uninstall it before installing
+a release (the signing keys differ). Uninstalling also deletes the readings stored on that phone.
+
+One-time setup: create a release keystore, keep it and its password safe (updates can only
+be signed with the same key), and add it to the repository secrets:
+
+```sh
+keytool -genkeypair -v -keystore thlogger-release.jks -alias thlogger \
+        -keyalg RSA -keysize 4096 -validity 10000
+gh secret set ANDROID_KEYSTORE_BASE64 < <(base64 -w0 thlogger-release.jks)
+gh secret set ANDROID_KEYSTORE_PASSWORD
+gh secret set ANDROID_KEY_ALIAS --body thlogger
+gh secret set ANDROID_KEY_PASSWORD      # same as the keystore password unless you set another
+```
+
 ### Host tool (Bluetooth)
 
 ```sh

@@ -2,3 +2,5 @@
 .vscode/
 __pycache__/
 sdkconfig.esp32c6*
+*.jks
+*.keystore

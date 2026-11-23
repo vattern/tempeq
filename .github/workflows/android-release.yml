@@ -1,0 +1,72 @@
+# Builds the Android app and publishes it as a GitHub Release when a version tag is pushed:
+#   git tag v0.2 && git push origin v0.2
+# Needs these repository secrets (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_BASE64   base64 of the release keystore (.jks)
+#   ANDROID_KEYSTORE_PASSWORD keystore password
+#   ANDROID_KEY_ALIAS         key alias (e.g. thlogger)
+#   ANDROID_KEY_PASSWORD      key password (same as the keystore password if you didn't set one)
+name: Android release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.2"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Restore keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Secret ANDROID_KEYSTORE_BASE64 is not set"; exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed APK
+        working-directory: android
+        env:
+          THLOGGER_KEYSTORE: ${{ runner.temp }}/release.jks
+          THLOGGER_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          THLOGGER_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          THLOGGER_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease --no-daemon -PappVersion="${TAG#v}"
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/th-logger-${TAG}.apk"
+
+      - name: Check the APK is signed
+        run: |
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$apksigner" verify --print-certs "$RUNNER_TEMP/th-logger-${TAG}.apk"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk="$RUNNER_TEMP/th-logger-${TAG}.apk"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$apk" --clobber
+          else
+            gh release create "$TAG" "$apk" --title "TH-Logger $TAG" --generate-notes
+          fi
