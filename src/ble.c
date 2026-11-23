@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -10,6 +11,7 @@
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "nvs.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -29,10 +31,12 @@ static const ble_uuid128_t uuid_cursor = TH_UUID(0x03);    // R/W uint32 history
 static const ble_uuid128_t uuid_history = TH_UUID(0x04);   // R   page of records
 static const ble_uuid128_t uuid_status = TH_UUID(0x05);    // R   flags/interval/range/...
 static const ble_uuid128_t uuid_control = TH_UUID(0x06);   // W   commands (0x01 = clear log)
+static const ble_uuid128_t uuid_name = TH_UUID(0x07);      // R/W advertised device name
+static const ble_uuid128_t uuid_id = TH_UUID(0x08);        // R   6-byte factory MAC (unit ID)
 
 #define CTRL_CLEAR 0x01
 
-enum { CH_TIME, CH_CURRENT, CH_CURSOR, CH_HISTORY, CH_STATUS, CH_CONTROL, CH_ESS_TEMP, CH_ESS_HUM };
+enum { CH_TIME, CH_CURRENT, CH_CURSOR, CH_HISTORY, CH_STATUS, CH_CONTROL, CH_NAME, CH_ID, CH_ESS_TEMP, CH_ESS_HUM };
 
 static volatile bool connected;
 static volatile bool synced;
@@ -42,7 +46,56 @@ static uint16_t conn_handle;
 static uint8_t own_addr_type;
 static uint32_t hist_cursor;
 
+static char dev_name[BLE_NAME_MAX_LEN + 1];
+
 static void advertise(void);
+
+// ---------------------------------------------------------------------------
+// Device name (kept in NVS, namespace "thcfg", key "name")
+// ---------------------------------------------------------------------------
+const char *ble_name(void) {
+  if (dev_name[0]) return dev_name;
+  strcpy(dev_name, BLE_DEVICE_NAME);
+  nvs_handle_t h;
+  if (nvs_open("thcfg", NVS_READONLY, &h) == ESP_OK) {
+    char buf[sizeof(dev_name)];
+    size_t len = sizeof(buf);
+    if (nvs_get_str(h, "name", buf, &len) == ESP_OK && buf[0]) strcpy(dev_name, buf);
+    nvs_close(h);
+  }
+  return dev_name;
+}
+
+bool ble_set_name(const char *name, size_t len) {
+  if (len == 0) {  // back to the default
+    name = BLE_DEVICE_NAME;
+    len = strlen(name);
+  }
+  if (len > BLE_NAME_MAX_LEN || name[0] == ' ' || name[len - 1] == ' ') return false;
+  for (size_t i = 0; i < len; i++)
+    if (name[i] < 0x20 || name[i] > 0x7e) return false;  // printable ASCII only
+
+  nvs_handle_t h;
+  if (nvs_open("thcfg", NVS_READWRITE, &h) != ESP_OK) return false;
+  char buf[BLE_NAME_MAX_LEN + 1];
+  memcpy(buf, name, len);
+  buf[len] = '\0';
+  bool ok = nvs_set_str(h, "name", buf) == ESP_OK && nvs_commit(h) == ESP_OK;
+  nvs_close(h);
+  if (!ok) return false;
+
+  strcpy(dev_name, buf);
+  if (synced) {
+    ble_svc_gap_device_name_set(dev_name);
+    // Re-advertise under the new name now; a connected client sees it after
+    // disconnecting (advertising restarts then).
+    if (adv_wanted && !connected) {
+      ble_gap_adv_stop();
+      advertise();
+    }
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // GATT
@@ -65,9 +118,12 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
   last_activity_us = esp_timer_get_time();
 
   if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-    uint8_t buf[4];
+    uint8_t buf[BLE_NAME_MAX_LEN];
     uint16_t len = 0;
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len) != 0) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    if (ch == CH_NAME) {
+      return ble_set_name((const char *)buf, len) ? 0 : BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    }
     if (ch == CH_TIME) {
       if (len != 4) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
       datalog_set_time(buf[0] | (buf[1] << 8) | (buf[2] << 16) | ((uint32_t)buf[3] << 24));
@@ -87,6 +143,16 @@ static int gatt_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt
   }
 
   if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
+
+  if (ch == CH_NAME) {
+    const char *name = ble_name();
+    return append(ctxt->om, name, strlen(name));
+  }
+  if (ch == CH_ID) {
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    return append(ctxt->om, mac, sizeof(mac));
+  }
 
   datalog_flush();
   reading_t last;
@@ -168,6 +234,8 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             CHR(&uuid_history, CH_HISTORY, BLE_GATT_CHR_F_READ),
             CHR(&uuid_status, CH_STATUS, BLE_GATT_CHR_F_READ),
             CHR(&uuid_control, CH_CONTROL, BLE_GATT_CHR_F_WRITE),
+            CHR(&uuid_name, CH_NAME, BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE),
+            CHR(&uuid_id, CH_ID, BLE_GATT_CHR_F_READ),
             {0},
         },
     },
@@ -221,8 +289,9 @@ static void advertise(void) {
   if (ble_gap_adv_set_fields(&fields) != 0) return;
 
   struct ble_hs_adv_fields rsp = {0};
-  rsp.name = (const uint8_t *)BLE_DEVICE_NAME;
-  rsp.name_len = strlen(BLE_DEVICE_NAME);
+  const char *name = ble_name();
+  rsp.name = (const uint8_t *)name;
+  rsp.name_len = strlen(name);
   rsp.name_is_complete = 1;
   if (ble_gap_adv_rsp_set_fields(&rsp) != 0) return;
 
@@ -264,7 +333,7 @@ void ble_start(void) {
   ble_svc_gatt_init();
   ble_gatts_count_cfg(gatt_svcs);
   ble_gatts_add_svcs(gatt_svcs);
-  ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
+  ble_svc_gap_device_name_set(ble_name());
   nimble_port_freertos_init(host_task);
 }
 

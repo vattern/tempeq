@@ -7,6 +7,7 @@
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 
+#include "ble.h"
 #include "config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -95,8 +96,20 @@ static void handle(char *cmd) {
       datalog_set_time((uint32_t)t);
       printf("OK\n");
     }
+  } else if (strcmp(cmd, "name") == 0) {
+    printf("NAME %s\nOK\n", ble_name());
+  } else if (strncmp(cmd, "name ", 5) == 0) {
+    const char *name = cmd + 5;
+    while (*name == ' ') name++;
+    size_t len = strlen(name);
+    while (len && name[len - 1] == ' ') len--;
+    if (len == 0 || !ble_set_name(name, len)) {
+      printf("ERR name must be 1-%d printable ASCII characters\n", BLE_NAME_MAX_LEN);
+    } else {
+      printf("NAME %s\nOK\n", ble_name());
+    }
   } else if (strcmp(cmd, "help") == 0) {
-    printf("commands: status | dump [from] | time <unix> | clear | help\nOK\n");
+    printf("commands: status | dump [from] | time <unix> | clear | name [new name] | help\nOK\n");
   } else {
     printf("ERR unknown command '%s' (try help)\n", cmd);
   }

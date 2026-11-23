@@ -7,6 +7,9 @@ Over Bluetooth (needs: pip install bleak):
     python tools/th_client.py dump --sync   # set clock first, then dump
     python tools/th_client.py status
     python tools/th_client.py clear         # delete all readings (asks first; --yes to skip)
+    python tools/th_client.py rename Garage # change the name the logger advertises as
+
+With several loggers, pick one with --name (default: the first logger found).
 
 Over USB (needs: pip install pyserial):
     python tools/th_client.py dump --usb            # auto-detect the XIAO
@@ -32,7 +35,9 @@ UUID_CURSOR = "7e1a0003" + BASE
 UUID_HISTORY = "7e1a0004" + BASE
 UUID_STATUS = "7e1a0005" + BASE
 UUID_CONTROL = "7e1a0006" + BASE
+UUID_NAME = "7e1a0007" + BASE
 CTRL_CLEAR = 0x01
+NAME_MAX_LEN = 24
 MIN_VALID_EPOCH = 1577836800
 
 USB_VID, USB_PID = 0x303A, 0x1001  # Espressif USB-Serial/JTAG
@@ -101,12 +106,25 @@ def confirm_clear(args, count):
 async def run_ble(args):
     from bleak import BleakClient, BleakScanner
 
-    print(f"Scanning for {args.name} (up to {args.timeout:.0f}s)...", file=sys.stderr)
-    dev = await BleakScanner.find_device_by_name(args.name, timeout=args.timeout)
+    print(f"Scanning for {args.name or 'a logger'} (up to {args.timeout:.0f}s)...", file=sys.stderr)
+    if args.name:
+        dev = await BleakScanner.find_device_by_name(args.name, timeout=args.timeout)
+    else:
+        dev = await BleakScanner.find_device_by_filter(
+            lambda d, adv: UUID_SERVICE in [u.lower() for u in adv.service_uuids], timeout=args.timeout)
     if dev is None:
         raise SystemExit("Device not found")
 
     async with BleakClient(dev) as client:
+        if args.cmd == "rename":
+            try:
+                await client.write_gatt_char(UUID_NAME, args.value.encode("ascii"), response=True)
+            except Exception as e:
+                raise SystemExit(f"Rename failed (firmware too old?): {e}")
+            name = (await client.read_gatt_char(UUID_NAME)).decode("ascii", "replace")
+            print(f"Logger now advertises as {name!r}", file=sys.stderr)
+            return
+
         if args.cmd == "sync" or args.sync:
             now = int(time.time())
             await client.write_gatt_char(UUID_TIME, struct.pack("<I", now), response=True)
@@ -116,6 +134,10 @@ async def run_ble(args):
         count = st["next"] - st["first"]
 
         if args.cmd == "status":
+            try:
+                print("name:", (await client.read_gatt_char(UUID_NAME)).decode("ascii", "replace"))
+            except Exception:
+                print("name:", dev.name)
             dev_time = struct.unpack("<I", await client.read_gatt_char(UUID_TIME))[0]
             latest = decode_record(await client.read_gatt_char(UUID_CURRENT)) if count else None
             print_status(st["clock_set"], dev_time, st["interval"], count, st["cap"], st["due"], latest)
@@ -203,6 +225,11 @@ def run_usb(args):
             if attempt == 9:
                 raise
     with s:
+        if args.cmd == "rename":
+            reply = usb_command(s, f"name {args.value}")
+            print(f"Logger now advertises as {reply[-1].removeprefix('NAME ')!r}", file=sys.stderr)
+            return
+
         if args.cmd == "sync" or args.sync:
             now = int(time.time())
             usb_command(s, f"time {now}")
@@ -215,6 +242,9 @@ def run_usb(args):
         count = int(f["count"])
 
         if args.cmd == "status":
+            name = next((l for l in usb_command(s, "name") if l.startswith("NAME ")), None)
+            if name:
+                print("name:", name[5:])
             # Only the latest reading is needed: dump from the last record number.
             rows = parse_dump(usb_command(s, f"dump {max(int(f['next']) - 1, 0)}"))
             print_status(f["clock_set"] == "1", int(f["now"]), int(f["interval"]), count,
@@ -249,14 +279,22 @@ def parse_dump(lines):
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["sync", "dump", "status", "clear"])
+    ap.add_argument("cmd", choices=["sync", "dump", "status", "clear", "rename"])
+    ap.add_argument("value", nargs="?", help="rename: the new name")
     ap.add_argument("--sync", action="store_true", help="also set the clock")
     ap.add_argument("--yes", action="store_true", help="clear without asking")
     ap.add_argument("--usb", nargs="?", const="auto", metavar="PORT",
                     help="use USB instead of Bluetooth (port auto-detected if omitted)")
-    ap.add_argument("--name", default="TH-Logger", help="Bluetooth device name")
+    ap.add_argument("--name", help="Bluetooth name of the logger to use (default: first one found)")
     ap.add_argument("--timeout", type=float, default=960, help="how long to wait for the logger (s)")
     args = ap.parse_args()
+    if args.cmd == "rename":
+        v = (args.value or "").strip()
+        if not v or len(v) > NAME_MAX_LEN or not all(0x20 <= ord(c) <= 0x7E for c in v):
+            ap.error(f"rename needs a new name of 1-{NAME_MAX_LEN} printable ASCII characters")
+        args.value = v
+    elif args.value is not None:
+        ap.error(f"unexpected argument {args.value!r}")
 
     if args.usb:
         run_usb(args)

@@ -158,6 +158,9 @@
         </select>
       </label>
     </div>
+    <label class="pick hidden" id="loggerPick">Showing
+      <select id="logger"></select>
+    </label>
     <div id="msg" class="muted">Press the button on the logger, then tap Connect.</div>
   </section>
 
@@ -189,6 +192,7 @@
     <div class="card">
       <dl class="meta" id="meta"></dl>
       <div class="row" style="margin-top:14px">
+        <button id="rename">Rename logger…</button>
         <button id="clear" class="danger">Clear logger…</button>
       </div>
     </div>
@@ -224,11 +228,15 @@ const U = (id) => `7e1a${id}-5d3b-4c6a-9f2e-1c0a7b3d9e10`;
 const UUID = {
   service: U("0000"), time: U("0001"), current: U("0002"),
   cursor: U("0003"), history: U("0004"), status: U("0005"), control: U("0006"),
+  name: U("0007"), id: U("0008"),
 };
 const CTRL_CLEAR = 0x01;
+const NAME_MAX_LEN = 24;
 const MIN_VALID_EPOCH = 1577836800;
 const TEMP_ERROR = -32768, HUM_ERROR = 0xffff;
-const STORE_KEY = "th-logger-v2";
+const STORE_PREFIX = "th-logger-v3:";   // + logger ID: that logger's readings
+const LEGACY_KEY = "th-logger-v2";       // single-logger store from before per-logger storage
+const LAST_KEY = "th-logger-last";       // ID of the logger shown last
 const RANGE_KEY = "th-logger-range";
 const TABLE_MAX = 2000;
 const CHART_MAX_POINTS = 600;
@@ -238,10 +246,10 @@ const el = {
   connect: $("connect"), sync: $("sync"), fetchMode: $("fetchMode"), msg: $("msg"), data: $("data"), empty: $("empty"),
   curT: $("curT"), curH: $("curH"), statT: $("statT"), statH: $("statH"), curTime: $("curTime"),
   chart: $("chart"), meta: $("meta"), rows: $("rows"), rowsNote: $("rowsNote"), csv: $("csv"),
-  share: $("share"), clear: $("clear"), range: $("range"), fetched: $("fetched"), unsupported: $("unsupported"),
+  share: $("share"), logger: $("logger"), loggerPick: $("loggerPick"), rename: $("rename"), clear: $("clear"), range: $("range"), fetched: $("fetched"), unsupported: $("unsupported"),
 };
 
-// Last result: { readings: [{ts, t, h}], first, next, status, clockOffset, synced, fetchedAt, demo }
+// Last result: { id, readings: [{ts, t, h}], first, next, status, name, clockOffset, synced, fetchedAt, demo }
 // readings[i] is the logger's record number first + i. ts = 0: time unknown.
 let current = null;
 let range = 7 * 86400;
@@ -274,18 +282,36 @@ async function readStatus(chStatus) {
   };
 }
 
-// Pick the user's logger and run `fn(service)` while connected; always disconnects.
+// The logger's advertised name, or null on firmware without the Name characteristic.
+async function readName(svc) {
+  try {
+    const v = await (await svc.getCharacteristic(UUID.name)).readValue();
+    return new TextDecoder().decode(v);
+  } catch (_) { return null; }
+}
+
+// A stable ID for the logger: its factory MAC, or (older firmware without the ID
+// characteristic) the browser's own ID for the device.
+async function readId(svc, device) {
+  try {
+    const v = await (await svc.getCharacteristic(UUID.id)).readValue();
+    return "mac-" + [...new Uint8Array(v.buffer, v.byteOffset, v.byteLength)]
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch (_) { return "dev-" + device.id; }
+}
+
+// Pick the user's logger and run `fn(service, device)` while connected; always disconnects.
 async function withLogger(fn) {
   let device;
   try {
-    setMsg("Choose TH-Logger from the list…");
+    setMsg("Choose your logger from the list…");
     device = await navigator.bluetooth.requestDevice({
       filters: [{ services: [UUID.service] }, { name: "TH-Logger" }],
       optionalServices: [UUID.service, 0x181a],
     });
     setMsg("Connecting…");
     const server = await device.gatt.connect();
-    return await fn(await server.getPrimaryService(UUID.service));
+    return await fn(await server.getPrimaryService(UUID.service), device);
   } finally {
     // Disconnect straight away so the logger can go back to sleep.
     try { if (device && device.gatt.connected) device.gatt.disconnect(); } catch (_) {}
@@ -308,6 +334,7 @@ async function fetchFromDevice(svc, syncClock, cached, forceDays = 0) {
   const clockOffset = devTime - Date.now() / 1000;   // + = logger ahead of phone
   const status = await readStatus(chStatus);
   const { first, next } = status;
+  const name = await readName(svc);
 
   // Keep cached readings the logger still has (cache must end inside the logger's
   // range); fetch the rest. The phone may hold only the newer part of the log.
@@ -349,7 +376,7 @@ async function fetchFromDevice(svc, syncClock, cached, forceDays = 0) {
   }
   if (status.nextDue < MIN_VALID_EPOCH) status.nextDue = Math.round(Date.now() / 1000 - (devTime - status.nextDue));
 
-  return { readings, first: readFirst, next: readFirst + readings.length, status, clockOffset, synced,
+  return { readings, first: readFirst, next: readFirst + readings.length, status, name, clockOffset, synced,
            fetchedAt: Date.now(), fetched };
 }
 
@@ -359,13 +386,22 @@ async function connect() {
   try {
     const mode = el.fetchMode.value;
     const forceDays = mode === "all" ? Infinity : +mode;
-    const result = await withLogger(async (svc) => {
+    let adoptedLegacy = false;
+    const result = await withLogger(async (svc, device) => {
       setMsg("Reading log…");
-      return fetchFromDevice(svc, el.sync.checked, current, forceDays);
+      const id = await readId(svc, device);
+      let cached = load(id);
+      if (!cached) { cached = loadLegacy(); adoptedLegacy = !!cached; }
+      const res = await fetchFromDevice(svc, el.sync.checked, cached, forceDays);
+      res.id = id;
+      if (!res.name) res.name = device.name || null;
+      return res;
     });
     el.fetchMode.value = "0";  // forcing is a one-off
     current = result;
     save(result);
+    if (adoptedLegacy) try { localStorage.removeItem(LEGACY_KEY); } catch (_) {}
+    updatePicker();
     render(result);
     const what = result.fetched === result.readings.length
       ? `Read ${result.readings.length} readings`
@@ -380,21 +416,22 @@ async function connect() {
 
 async function clearLogger() {
   if (!navigator.bluetooth) return;
-  const n = current && !current.demo ? current.readings.length : null;
-  const ok = confirm(`Delete ${n != null ? `all ${n}` : "all"} readings stored on the logger?\n\n` +
+  const ok = confirm("Delete all readings stored on the logger you pick next?\n\n" +
     "This cannot be undone. Download a CSV first if you want to keep them.");
   if (!ok) return;
   setBusy(true);
   try {
-    const status = await withLogger(async (svc) => {
+    const { id, name, status } = await withLogger(async (svc, device) => {
       setMsg("Clearing…");
+      const id = await readId(svc, device);
       const [chControl, chStatus] = await Promise.all([UUID.control, UUID.status].map((u) => svc.getCharacteristic(u)));
       await write(chControl, new Uint8Array([CTRL_CLEAR]));
-      return readStatus(chStatus);
+      return { id, name: (await readName(svc)) || device.name || null, status: await readStatus(chStatus) };
     });
-    current = { readings: [], first: status.first, next: status.first, status, clockOffset: 0,
+    current = { id, readings: [], first: status.first, next: status.first, status, name, clockOffset: 0,
                 synced: false, fetchedAt: Date.now() };
     save(current);
+    updatePicker();
     render(current);
     setMsg("Logger cleared.", "ok");
   } catch (e) {
@@ -404,8 +441,45 @@ async function clearLogger() {
   }
 }
 
+async function renameLogger() {
+  if (!navigator.bluetooth) return;
+  const input = prompt(`New name for the logger (up to ${NAME_MAX_LEN} letters, digits or symbols; leave empty for the default):`,
+    current && current.name ? current.name : "");
+  if (input == null) return;
+  const name = input.trim();
+  if (name.length > NAME_MAX_LEN || !/^[\x20-\x7e]*$/.test(name)) {
+    setMsg(`Names can be up to ${NAME_MAX_LEN} characters, plain letters, digits and symbols only.`, "err");
+    return;
+  }
+  setBusy(true);
+  try {
+    const { id, newName } = await withLogger(async (svc, device) => {
+      setMsg("Renaming…");
+      const id = await readId(svc, device);
+      const ch = await svc.getCharacteristic(UUID.name).catch(() => {
+        throw new Error("this logger's firmware can't be renamed; update it first");
+      });
+      await write(ch, new TextEncoder().encode(name));
+      return { id, newName: await readName(svc) };
+    });
+    const stored = current && current.id === id ? current : load(id);
+    if (stored) {
+      stored.name = newName;
+      save(stored);
+      updatePicker();
+      if (stored === current) render(current);
+    }
+    setMsg(`Logger renamed to “${newName}”.`, "ok");
+  } catch (e) {
+    showError(e);
+  } finally {
+    setBusy(false);
+  }
+}
+
 function setBusy(busy) {
   el.connect.disabled = busy || !navigator.bluetooth;
+  el.rename.disabled = busy || !navigator.bluetooth;
   el.clear.disabled = busy || !navigator.bluetooth;
 }
 
@@ -420,6 +494,7 @@ function showError(e) {
 const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDateTime = (ts) => ts === 0 ? "unknown time"
   : new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const fmt1 = (x) => (x == null ? "–" : x.toFixed(1));
 
 function ago(seconds) {
@@ -483,6 +558,7 @@ function render(res) {
       : `<span class="pill warn">not set</span>`;
   const used = status.capacity ? ` · ${(100 * readings.length / status.capacity).toFixed(readings.length * 1000 < status.capacity ? 2 : 1)}% full` : "";
   el.meta.innerHTML = `
+    ${res.name ? `<dt>Logger</dt><dd>${escapeHtml(res.name)}</dd>` : ""}
     <dt>Readings</dt><dd>${readings.length.toLocaleString()} (every ${Math.round(status.interval / 60)} min)${used}</dd>
     ${status.first != null && res.first > status.first
       ? `<dt>Not downloaded</dt><dd>${(res.first - status.first).toLocaleString()} older readings on the logger (choose “everything again”)</dd>` : ""}
@@ -636,7 +712,8 @@ function csvText(res) {
 
 function csvFile(res) {
   const stamp = new Date(res.fetchedAt).toISOString().slice(0, 16).replace(/[:T]/g, "-");
-  return new File([csvText(res)], `th-logger-${stamp}.csv`, { type: "text/csv" });
+  const who = (res.name || "th-logger").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "th-logger";
+  return new File([csvText(res)], `${who}-${stamp}.csv`, { type: "text/csv" });
 }
 
 el.csv.addEventListener("click", () => {
@@ -660,20 +737,76 @@ try {
 
 // Stored column-wise with centi-units to keep a long history within localStorage limits.
 function save(res) {
-  if (res.demo) return;
+  if (res.demo || !res.id) return;
+  const key = STORE_PREFIX + res.id;
   const c = (x) => (x == null ? null : Math.round(x * 100));
   const packed = {
-    first: res.first, next: res.next, status: res.status, clockOffset: res.clockOffset,
+    first: res.first, next: res.next, status: res.status, name: res.name, clockOffset: res.clockOffset,
     synced: res.synced, fetchedAt: res.fetchedAt,
     ts: res.readings.map((r) => r.ts), t: res.readings.map((r) => c(r.t)), h: res.readings.map((r) => c(r.h)),
   };
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(packed)); }
-  catch (_) { try { localStorage.removeItem(STORE_KEY); } catch (_) {} }  // too big: next connect reads everything
+  try { localStorage.setItem(key, JSON.stringify(packed)); }
+  catch (_) { try { localStorage.removeItem(key); } catch (_) {} }  // too big: next connect reads everything
+  try { localStorage.setItem(LAST_KEY, res.id); } catch (_) {}
 }
 
-function load() {
+function load(id) {
+  const p = unpack(STORE_PREFIX + id);
+  if (p) p.id = id;
+  return p;
+}
+
+// The old single-logger store: used once as the cache for whichever logger connects
+// first (the range checks in fetchFromDevice reject it if it doesn't fit), then removed.
+function loadLegacy() {
+  const p = unpack(LEGACY_KEY);
+  if (p) delete p.name;
+  return p;
+}
+
+// IDs and names of every logger stored on this phone, newest first (no readings decoded).
+function storedLoggers() {
+  const list = [];
   try {
-    const p = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(STORE_PREFIX)) continue;
+      try {
+        const p = JSON.parse(localStorage.getItem(key));
+        list.push({ id: key.slice(STORE_PREFIX.length), name: p.name, fetchedAt: p.fetchedAt || 0 });
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return list.sort((a, b) => b.fetchedAt - a.fetchedAt);
+}
+
+function loggerLabel(l) {
+  return l.name || (l.id ? `Logger ${l.id.slice(-6)}` : "the logger");
+}
+
+// The "Showing" picker appears once the phone holds readings from more than one logger.
+function updatePicker() {
+  const list = storedLoggers();
+  el.loggerPick.classList.toggle("hidden", list.length < 2 || !!(current && current.demo));
+  el.logger.innerHTML = "";
+  for (const l of list) {
+    const o = document.createElement("option");
+    o.value = l.id;
+    o.textContent = loggerLabel(l);
+    el.logger.append(o);
+  }
+  if (current && current.id) el.logger.value = current.id;
+}
+
+function showStored(p) {
+  current = p;
+  render(p);
+  setMsg(`Showing ${loggerLabel(p)} from ${ago((Date.now() - p.fetchedAt) / 1000)}. Press the logger's button, then Connect to refresh.`);
+}
+
+function unpack(key) {
+  try {
+    const p = JSON.parse(localStorage.getItem(key) || "null");
     if (!p || !Array.isArray(p.ts)) return null;
     const d = (x) => (x == null ? null : x / 100);
     p.readings = p.ts.map((ts, i) => ({ ts, t: d(p.t[i]), h: d(p.h[i]) }));
@@ -694,7 +827,7 @@ function demoData() {
     const t = 20.5 + 2.4 * day + 1.5 * season + 0.15 * Math.sin(i * 1.7), h = 52 - 7 * day - 4 * season + 0.6 * Math.cos(i * 1.3);
     readings.push(i === 30 ? { ts, t: null, h: null } : { ts, t: Math.round(t * 100) / 100, h: Math.round(h * 100) / 100 });
   }
-  return { readings, first: 0, next: n, demo: true, synced: false, clockOffset: 2, fetchedAt: Date.now(),
+  return { readings, first: 0, next: n, demo: true, name: "Greenhouse", synced: false, clockOffset: 2, fetchedAt: Date.now(),
            status: { clockSet: true, interval: step, first: 0, next: n, capacity: 211820, nextDue: end + step } };
 }
 
@@ -705,18 +838,25 @@ if (!navigator.bluetooth) {
 }
 setBusy(false);
 el.connect.addEventListener("click", connect);
+el.rename.addEventListener("click", renameLogger);
 el.clear.addEventListener("click", clearLogger);
+el.logger.addEventListener("change", () => {
+  const p = load(el.logger.value);
+  if (!p) return;
+  try { localStorage.setItem(LAST_KEY, p.id); } catch (_) {}
+  showStored(p);
+});
 
 if (new URLSearchParams(location.search).has("demo")) {
   current = demoData();
   render(current);
 } else {
-  const prev = load();
-  if (prev && prev.readings) {
-    current = prev;
-    render(prev);
-    setMsg(`Showing data from ${ago((Date.now() - prev.fetchedAt) / 1000)}. Press the logger's button, then Connect to refresh.`);
-  }
+  let last = null;
+  try { last = localStorage.getItem(LAST_KEY); } catch (_) {}
+  const list = storedLoggers();
+  const prev = (last && load(last)) || (list.length && load(list[0].id)) || loadLegacy();
+  if (prev && prev.readings) showStored(prev);
+  updatePicker();
 }
 </script>
 </body>

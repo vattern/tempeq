@@ -92,7 +92,9 @@ LP core (ulp/main.c)                       HP core (src/)
 
 ## BLE protocol
 
-Device name `TH-Logger`. Service `7e1a0000-5d3b-4c6a-9f2e-1c0a7b3d9e10`.
+Device name `TH-Logger` by default; each unit can be renamed (see Name below, the
+`name` USB command, `th_client.py rename`, or *Rename logger…* on the web page). The
+name is kept in NVS, so it survives power loss and re-flashing. Service `7e1a0000-5d3b-4c6a-9f2e-1c0a7b3d9e10`.
 All values are little-endian.
 
 | Char UUID prefix | Props | Format |
@@ -103,6 +105,8 @@ All values are little-endian.
 | `7e1a0004` History | R   | `uint32 next, uint32 start, uint8 n` + `n` records (max 60 per page) |
 | `7e1a0005` Status  | R   | `uint8 flags (bit0=clock set), uint16 interval_s, uint32 first, uint32 next, uint32 capacity, uint32 next_due` |
 | `7e1a0006` Control | W   | `uint8` command: `0x01` = delete all readings |
+| `7e1a0007` Name    | R/W | advertised name, 1–24 printable ASCII characters (no length byte). Write it to rename; an empty write restores `TH-Logger` |
+| `7e1a0008` ID      | R   | 6-byte factory MAC address: a fixed ID for this unit that doesn't change when it is renamed |
 
 **Record** (8 bytes): `uint32 timestamp, int16 temp (0.01 °C), uint16 humidity (0.01 %RH)`.
 A failed sensor read is stored as temp `-32768` and humidity `0xFFFF`.
@@ -134,6 +138,7 @@ pip install pyserial
 python tools/th_client.py dump --usb --sync > log.csv   # auto-detects the XIAO
 python tools/th_client.py status --usb /dev/ttyACM0
 python tools/th_client.py clear --usb                  # asks first; --yes to skip
+python tools/th_client.py rename Garage --usb
 ```
 
 You can also use a serial terminal. Commands are lines of text:
@@ -144,6 +149,7 @@ You can also use a serial terminal. Commands are lines of text:
 | `dump [from]` | `ts,temp_c,humidity_pct` header, then one CSV line per reading, oldest first. With `from`, only record numbers ≥ `from` |
 | `time <unix>` | sets the clock (UTC) |
 | `clear` | deletes all readings |
+| `name [new name]` | `NAME <name>`. With a new name (1–24 printable ASCII characters), renames the logger |
 | `help` | list of commands |
 
 Every reply ends with `OK` or `ERR <reason>`. In the debug build, log lines
@@ -159,7 +165,8 @@ asserted (`th_client.py` does), or use a terminal that doesn't toggle them.
 a chart (24 h, 7 d, 30 d or everything), min/max values and a table. It sets the
 logger's clock, exports every reading as CSV, and can clear the logger. It keeps a copy
 of what it has read, so after the first time it only fetches new readings and still
-shows the data offline. To re-read readings that are already on the phone, pick
+shows the data offline. Copies are kept per logger (by its ID), so one phone can read
+several loggers; once it holds more than one, a *Showing* list switches between them. To re-read readings that are already on the phone, pick
 **last 24 h / 2 days / 7 days / everything again** under *Download* before tapping
 Connect. It disconnects as soon as it has read the data, so the logger
 can sleep again.
@@ -167,7 +174,8 @@ can sleep again.
 - **Android:** Chrome. **iPhone/iPad:** the free Bluefy browser (Safari has no Web Bluetooth).
 - Hosted at **https://vattern.github.io/tempeq/** (deployed from `tools/web` by
   `.github/workflows/pages.yml` on every push to `main`).
-- Press the logger's D0 button, then tap **Connect** and pick TH-Logger.
+- Press the logger's D0 button, then tap **Connect** and pick your logger (TH-Logger
+  unless renamed). **Rename logger…** changes the name it advertises as.
 - Add `?demo` to the URL to preview the page with made-up data.
 
 ### Host tool (Bluetooth)
@@ -177,7 +185,11 @@ pip install bleak
 python tools/th_client.py dump --sync > log.csv   # every stored reading
 python tools/th_client.py status
 python tools/th_client.py clear                    # asks first; --yes to skip
+python tools/th_client.py rename Garage            # change the advertised name
+python tools/th_client.py status --name Garage     # pick one logger when there are several
 ```
+
+Without `--name`, the tool uses the first logger it finds.
 
 A full dump over Bluetooth moves 60 readings per round trip, about a month of
 readings in 15–30 s. USB is much faster for large logs.

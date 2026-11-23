@@ -39,7 +39,10 @@
 // Advertising interval (units of 0.625 ms). 160 = 100 ms.
 #define BLE_ADV_INTERVAL              160
 
+// Default advertised name; change it per unit over BLE or USB (`name <text>`).
 #define BLE_DEVICE_NAME    "TH-Logger"
+// Longest name allowed (it must fit the 31-byte scan response with its 2-byte header).
+#define BLE_NAME_MAX_LEN   24
 
 // Records per history page. 9 + 60 * 8 = 489 bytes (< 512 byte ATT limit).
 #define HISTORY_PAGE_SIZE  60
