@@ -70,10 +70,13 @@ class Store private constructor(context: Context) :
 
     fun loggerByAddress(address: String): LoggerInfo? = loggers().firstOrNull { it.address == address }
 
-    /** Readings with timestamp ≥ [sinceTs], oldest first. The default leaves out unknown-time (0) ones. */
-    fun readings(id: String, sinceTs: Long = 1): List<Reading> = readableDatabase.rawQuery(
-        "SELECT ts, temp, hum FROM reading WHERE logger = ? AND ts >= ? ORDER BY rec",
-        arrayOf(id, sinceTs.toString()),
+    /**
+     * Readings with [sinceTs] ≤ timestamp < [untilTs], oldest first. The default leaves out
+     * unknown-time (0) ones.
+     */
+    fun readings(id: String, sinceTs: Long = 1, untilTs: Long = Long.MAX_VALUE): List<Reading> = readableDatabase.rawQuery(
+        "SELECT ts, temp, hum FROM reading WHERE logger = ? AND ts >= ? AND ts < ? ORDER BY rec",
+        arrayOf(id, sinceTs.toString(), untilTs.toString()),
     ).use { c ->
         buildList(c.count) {
             while (c.moveToNext()) add(

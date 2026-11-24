@@ -14,13 +14,18 @@ import java.time.Instant
 import java.util.Locale
 
 enum class Range(val label: String, val seconds: Long?) {
-    DAY("24 h", 86_400), WEEK("7 d", 7 * 86_400), MONTH("30 d", 30 * 86_400), ALL("All", null)
+    DAY("24 h", 86_400), WEEK("7 d", 7 * 86_400), MONTH("30 d", 30 * 86_400), ALL("All", null),
+    /** Between [UiState.customStart] and [UiState.customEnd]. */
+    CUSTOM("Custom…", null),
 }
 
 data class UiState(
     val loggers: List<LoggerInfo> = emptyList(),
     val selectedId: String? = null,
     val range: Range = Range.DAY,
+    /** Custom window, unix seconds: start inclusive, end exclusive. */
+    val customStart: Long = 0,
+    val customEnd: Long = 0,
     val readings: List<Reading> = emptyList(),
     val latest: Reading? = null,
     val busy: Boolean = false,
@@ -38,6 +43,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         UiState(
             selectedId = prefs.getString("selected", null),
             range = Range.entries.getOrElse(prefs.getInt("range", 0)) { Range.DAY },
+            customStart = prefs.getLong("custom_start", 0),
+            customEnd = prefs.getLong("custom_end", 0),
             backgroundSync = BackgroundSync.isEnabled(app),
         ),
     )
@@ -52,8 +59,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val (loggers, id, readings, latest) = withContext(Dispatchers.IO) {
             val loggers = store.loggers()
             val id = s.selectedId?.takeIf { sel -> loggers.any { it.id == sel } } ?: loggers.firstOrNull()?.id
-            val since = s.range.seconds?.let { Instant.now().epochSecond - it } ?: 1
-            val readings = id?.let { store.readings(it, since) }.orEmpty()
+            val (since, until) = when (s.range) {
+                Range.CUSTOM -> s.customStart to s.customEnd
+                else -> (s.range.seconds?.let { Instant.now().epochSecond - it } ?: 1) to Long.MAX_VALUE
+            }
+            val readings = id?.let { store.readings(it, since.coerceAtLeast(1), until) }.orEmpty()
             val latest = readings.lastOrNull() ?: id?.let { store.readings(it).lastOrNull() }
             Quad(loggers, id, readings, latest)
         }
@@ -71,6 +81,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setRange(range: Range) {
         prefs.edit().putInt("range", range.ordinal).apply()
         _state.update { it.copy(range = range) }
+        viewModelScope.launch { reload() }
+    }
+
+    /** Shows readings from [start] (inclusive) to [end] (exclusive), unix seconds. */
+    fun setCustomRange(start: Long, end: Long) {
+        prefs.edit().putInt("range", Range.CUSTOM.ordinal).putLong("custom_start", start).putLong("custom_end", end).apply()
+        _state.update { it.copy(range = Range.CUSTOM, customStart = start, customEnd = end) }
         viewModelScope.launch { reload() }
     }
 
